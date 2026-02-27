@@ -1,62 +1,78 @@
-const { default: makeWASocket, DisconnectReason, useMultiFileAuthState } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const express = require('express');
 const cors = require('cors');
 const qrcode = require('qrcode');
 const fs = require('fs');
+const pino = require('pino');
 
 const app = express();
-app.use(cors());
+app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-const SECRET = process.env.BAILEYS_SECRET || 'sanate_secret_2025';
-const PORT = process.env.PORT || 3001;
+const SECRET = process.env.SECRET || process.env.BAILEYS_SECRET || 'sanate_secret_2025';
+const PORT = process.env.PORT || 3000;
 const AUTH_DIR = './auth_info';
 
-let sock = null, currentQR = null, status = 'disconnected';
+let sock = null, currentQR = null, status = 'disconnected', reconnectTimer = null;
 
 async function connectToWhatsApp() {
-  const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
-  sock = makeWASocket({ auth: state, printQRInTerminal: false });
-  sock.ev.on('connection.update', async (update) => {
-    const { connection, lastDisconnect, qr } = update;
-    if (qr) { currentQR = qr; status = 'qr'; }
-    if (connection === 'close') {
-      status = 'disconnected'; currentQR = null;
-      const code = lastDisconnect?.error?.output?.statusCode;
-      if (code !== DisconnectReason.loggedOut) setTimeout(connectToWhatsApp, 3000);
-    }
-    if (connection === 'open') { status = 'connected'; currentQR = null; console.log('Conectado WhatsApp!'); }
-  });
-  sock.ev.on('creds.update', saveCreds);
-}
+    try {
+          if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
+          const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+          const { version } = await fetchLatestBaileysVersion();
 
-const auth = (req, res, next) => {
-  const s = req.headers['x-secret'] || req.query.secret;
-  if (s !== SECRET) return res.status(401).json({ error: 'No autorizado' });
-  next();
-};
+      sock = makeWASocket({
+              version,
+              auth: state,
+              printQRInTerminal: true,
+              loggconst { default: makeWASocket, DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
+        const express = require('express');
+      const cors = require('cors');
+      const qrcode = require('qrcode');
+      const fs = require('fs');
+      const pino = require('pino');
 
-app.get('/health', (req, res) => res.json({ ok: true, status }));
-app.get('/status', auth, (req, res) => res.json({ status, hasQR: !!currentQR }));
-app.get('/qr', auth, async (req, res) => {
-  if (!currentQR) return res.json({ qr: null, status });
-  const qrDataUrl = await qrcode.toDataURL(currentQR);
-  res.json({ qr: qrDataUrl, status });
-});
-app.get('/chats', auth, (req, res) => res.json({ chats: [] }));
-app.get('/messages/:id', auth, (req, res) => res.json({ messages: [] }));
-app.post('/send', auth, async (req, res) => {
-  const { to, message } = req.body;
-  if (!sock || status !== 'connected') return res.status(400).json({ error: 'No conectado' });
-  try { await sock.sendMessage(to, { text: message }); res.json({ ok: true }); }
-  catch (e) { res.status(500).json({ error: e.message }); }
-});
-app.post('/logout', auth, async (req, res) => {
-  if (sock) { try { await sock.logout(); } catch(e){} }
-  status = 'disconnected'; currentQR = null;
-  if (fs.existsSync(AUTH_DIR)) fs.rmSync(AUTH_DIR, { recursive: true });
-  res.json({ ok: true });
-  setTimeout(connectToWhatsApp, 2000);
-});
+  const app = express();
+      app.use(cors({ origin: '*' }));
+      app.use(express.json());
 
-app.listen(PORT, () => { console.log('Servidor Baileys en puerto', PORT); connectToWhatsApp(); });
+  const SECRET = process.env.SECRET || process.env.BAILEYS_SECRET || 'sanate_secret_2025';
+      const PORT = process.env.PORT || 3000;
+      const AUTH_DIR = './auth_info';
+
+  let sock = null, currentQR = null, status = 'disconnected', reconnectTimer = null;
+
+  async function connectToWhatsApp() {
+      try {
+            if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
+            const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+            const { version } = await fetchLatestBaileysVersion();
+
+        sock = makeWASocket({
+                version,
+                auth: state,
+                printQRInTerminal: true,
+                logger: pino({ level: 'silent' }),
+                browser: ['Sanate Bot', 'Chrome', '1.0'],
+                connectTimeoutMs: 60000,
+                defaultQueryTimeoutMs: 60000,
+                keepAliveIntervalMs: 10000,
+                retryRequestDelayMs: 2000,
+        });
+
+        sock.ev.on('connection.update', async (update) => {
+                const { connection, lastDisconnect, qr } = update;
+                console.log('connection.update:', { connection, hasQR: !!qr });
+                if (qr) {
+                          currentQR = qr;
+                          status = 'qr';
+                          console.log('QR generado, listo para escanear');
+                }
+                if (connection === 'close') {
+                          status = 'disconnected';
+                          currentQR = null;
+                          const code = lastDisconnect?.error?.output?.statusCode;
+                          console.log('Conexion cerrada, codigo:', code);
+                          if (code !== DisconnectReason.loggedOut) {
+                                      console.log('Reconectando en 5s...');
+                                      if (reconnectTimer) clear
