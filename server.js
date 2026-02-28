@@ -20,7 +20,6 @@ async function connectToWhatsApp() {
     if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
     const { version } = await fetchLatestBaileysVersion();
-
     sock = makeWASocket({
       version,
       auth: state,
@@ -31,7 +30,6 @@ async function connectToWhatsApp() {
       defaultQueryTimeoutMs: 60000,
       keepAliveIntervalMs: 25000,
     });
-
     sock.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect, qr } = update;
       if (qr) { currentQR = qr; status = 'qr'; console.log('QR listo'); }
@@ -45,7 +43,6 @@ async function connectToWhatsApp() {
       }
       if (connection === 'open') { status = 'connected'; currentQR = null; console.log('Conectado!'); }
     });
-
     sock.ev.on('creds.update', saveCreds);
   } catch (err) {
     console.error('Error:', err.message);
@@ -65,7 +62,7 @@ app.get('/status', auth, (req, res) => res.json({ status, hasQR: !!currentQR }))
 app.get('/qr', auth, async (req, res) => {
   if (!currentQR) return res.json({ qr: null, status });
   try {
-    const qrDataUrl = await qrcode.toDataURL(currentQR, { width: 300 });
+    const qrDataUrl = await qrcode.toDataURL(currentQR, { width: 500, margin: 2, errorCorrectionLevel: 'M' });
     res.json({ qr: qrDataUrl, status });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
