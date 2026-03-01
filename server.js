@@ -94,8 +94,36 @@ app.get('/qr', auth, async (req, res) => {
   try { const qrDataUrl = await qrcode.toDataURL(currentQR, { width: 500, margin: 2, errorCorrectionLevel: 'M' }); res.json({ qr: qrDataUrl, status: waStatus }); }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
-app.get('/chats', auth, (req, res) => { const list = Array.from(waChats.values()).sort((a, b) => (b.ts || 0) - (a.ts || 0)).slice(0, 100); res.json({ chats: list }); });
-app.get('/messages/:id', auth, (req, res) => { const jid = decodeURIComponent(req.params.id); res.json({ messages: (waMessages.get(jid) || []).slice(-50) }); });
+app.get('/chats', auth, (req, res) => {
+  const all = Array.from(waChats.values());
+  const withMsgs = all.filter(c => waMessages.has(c.id));
+  const withoutMsgs = all.filter(c => !waMessages.has(c.id));
+  const sortTs = (a, b) => (b.ts || 0) - (a.ts || 0);
+  const sorted = [...withMsgs.sort(sortTs), ...withoutMsgs.sort(sortTs)].slice(0, 100);
+  const list = sorted.map(chat => ({
+    id: chat.id,
+    name: chat.name || chat.id.split('@')[0],
+    phone: chat.id.split('@')[0],
+    preview: chat.lastMsg || '',
+    time: chat.ts ? new Date(chat.ts).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' }) : '',
+    unread: chat.unread || 0,
+  }));
+  res.json({ chats: list });
+});
+app.get('/messages/:id', auth, (req, res) => {
+  const jid = decodeURIComponent(req.params.id);
+  let msgs = waMessages.get(jid) || [];
+  if (!msgs.length && !jid.includes('@')) msgs = waMessages.get(jid + '@s.whatsapp.net') || [];
+  if (waChats.has(jid)) { const c = waChats.get(jid); waChats.set(jid, { ...c, unread: 0 }); }
+  const formatted = msgs.slice(-50).map(msg => ({
+    id: msg.id,
+    dir: msg.fromMe ? 's' : 'r',
+    txt: msg.body || '',
+    time: msg.ts ? new Date(msg.ts).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' }) : '',
+    ts: msg.ts,
+  }));
+  res.json({ messages: formatted });
+});
 app.post('/send', auth, async (req, res) => {
   const { to, message } = req.body;
   if (!sock || waStatus !== 'connected') return res.status(400).json({ error: 'No conectado' });
