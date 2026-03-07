@@ -22,6 +22,8 @@ const WA_HISTORY_DAYS = 15;
 let sock = null, currentQR = null, waStatus = 'disconnected', reconnectTimer = null;
 const waChats = new Map();
 const waMessages = new Map();
+const waAvatars = new Map();
+const waLifecycle = new Map();
 
 function storeMsg(msg) {
   try {
@@ -47,7 +49,7 @@ async function connectToWhatsApp() {
     if (!fs2.existsSync(AUTH_DIR)) fs2.mkdirSync(AUTH_DIR, { recursive: true });
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
     const { version } = await fetchLatestBaileysVersion();
-    sock = makeWASocket({ version, auth: state, printQRInTerminal: false, logger: pino({ level: 'silent' }), browser: ['Chrome (Linux)', 'Chrome', '121.0.0'], markOnlineOnConnect: false, connectTimeoutMs: 60000, defaultQueryTimeoutMs: 60000, keepAliveIntervalMs: 25000, syncFullHistory: false });
+    sock = makeWASocket({ version, auth: state, printQRInTerminal: false, logger: pino({ level: 'silent' }), browser: ['Chrome (Windows)', 'Chrome', '121.0.0'], markOnlineOnConnect: false, connectTimeoutMs: 60000, defaultQueryTimeoutMs: 60000, keepAliveIntervalMs: 25000, syncFullHistory: false });
     sock.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect, qr } = update;
       if (qr) { currentQR = qr; waStatus = 'qr'; console.log('QR listo'); }
@@ -87,7 +89,7 @@ async function connectToWhatsApp() {
 const auth = (req, res, next) => { const s = req.headers['x-secret'] || req.query.secret; if (s !== SECRET) return res.status(401).json({ error: 'No autorizado' }); next(); };
 
 app.get('/health', (req, res) => res.json({ ok: true, status: waStatus, hasQR: !!currentQR }));
-app.get('/ping',   (req, res) => res.json({ v: '2.2', chats: waChats.size, msgs: waMessages.size, status: waStatus, ts: Date.now() }));
+app.get('/ping',   (req, res) => res.json({ v: '2.3', chats: waChats.size, msgs: waMessages.size, status: waStatus, ts: Date.now() }));
 app.get('/status', auth, (req, res) => res.json({ status: waStatus, hasQR: !!currentQR }));
 app.get('/qr', auth, async (req, res) => {
   if (!currentQR) return res.json({ qr: null, status: waStatus });
@@ -107,6 +109,9 @@ app.get('/chats', auth, (req, res) => {
     preview: chat.lastMsg || '',
     time: chat.ts ? new Date(chat.ts).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' }) : '',
     unread: chat.unread || 0,
+      isGroup: chat.id.endsWith('@g.us'),
+      avatar: waAvatars.get(chat.id) || null,
+      lifecycle: waLifecycle.get(chat.id) || null,
   }));
   res.json({ chats: list });
 });
@@ -130,9 +135,34 @@ app.post('/send', auth, async (req, res) => {
   try { const jid = to.includes('@') ? to : to + '@s.whatsapp.net'; await sock.sendMessage(jid, { text: message }); res.json({ ok: true }); }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
+app.get('/lifecycle', auth, (req, res) => {
+  const all = {};
+  waLifecycle.forEach((v, k) => { all[k] = v; });
+  res.json({ lifecycle: all });
+});
+app.post('/lifecycle', auth, (req, res) => {
+  const { jid, stage } = req.body;
+  if (!jid || !stage) return res.status(400).json({ error: 'jid y stage requeridos' });
+  const VALID = ['nuevo', 'potencial', 'cliente', 'perdido'];
+  if (!VALID.includes(stage)) return res.status(400).json({ error: 'stage invalido' });
+  waLifecycle.set(jid, { stage, updatedAt: Date.now() });
+  res.json({ ok: true });
+});
+app.get('/avatar/:id', auth, async (req, res) => {
+  const jid = decodeURIComponent(req.params.id);
+  if (waAvatars.has(jid)) return res.json({ url: waAvatars.get(jid) });
+  try {
+    if (!sock || waStatus !== 'connected') return res.json({ url: null });
+    const url = await sock.profilePictureUrl(jid, 'image').catch(() => null);
+    waAvatars.set(jid, url);
+    res.json({ url });
+  } catch(e) { waAvatars.set(jid, null); res.json({ url: null }); }
+});
 app.post('/logout', auth, async (req, res) => {
   if (sock) { try { await sock.logout(); } catch (e) {} }
   waStatus = 'disconnected'; currentQR = null; waChats.clear(); waMessages.clear();
+  waAvatars.clear();
+  waLifecycle.clear();
   if (reconnectTimer) clearTimeout(reconnectTimer);
   if (fs2.existsSync(AUTH_DIR)) fs2.rmSync(AUTH_DIR, { recursive: true });
   res.json({ ok: true });
