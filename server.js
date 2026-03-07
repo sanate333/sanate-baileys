@@ -148,8 +148,6 @@ app.get('/chats', auth, (req, res) => {
     res.json({ ok: false, photoUrl: null });
   }
 });
-ts: list });
-});
 app.get('/messages/:id', auth, (req, res) => {
   const jid = decodeURIComponent(req.params.id);
   let msgs = waMessages.get(jid) || [];
