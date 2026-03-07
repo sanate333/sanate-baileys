@@ -14,7 +14,7 @@ const app = express();
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-const SECRET = process.env.SECRET || process.env.BAILEYS_SECRET || 'sanate_secret_2025';
+const SECRET = process.env.SECRET || process.env.BAILEYS_SECRET || 'sanate_secret_2025';h
 const PORT = process.env.PORT || 3000;
 const AUTH_DIR = './auth_info';
 const WA_HISTORY_DAYS = 15;
@@ -47,8 +47,7 @@ async function connectToWhatsApp() {
     if (!fs2.existsSync(AUTH_DIR)) fs2.mkdirSync(AUTH_DIR, { recursive: true });
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
     const { version } = await fetchLatestBaileysVersion();
-    sock = makeWASocket({ version, auth: state, printQRInTerminal: true, logger: pino({ level: 'silent' }), browser: ['Sanate Bot', 'Chrome', '1.0'], connectTimeoutMs: 60000, defaultQueryTimeoutMs: 60000, keepAliveIntervalMs: 25000, syncFullHistory: true });
-    sock.ev.on('connection.update', async (update) => {
+    sock = makeWASocket({ version, auth: state, printQRInTerminal: false, logger: pino({ level: 'silent' }), browser: ['Chrome (Linux)', 'Chrome', '121.0.0'], markOnlineOnConnect: false, connectTimeoutMs: 60000, defaultQueryTimeoutMs: 60000, keepAliveIntervalMs: 25000, syncFullHistory: false, async (update) => {
       const { connection, lastDisconnect, qr } = update;
       if (qr) { currentQR = qr; waStatus = 'qr'; console.log('QR listo'); }
       if (connection === 'close') {
