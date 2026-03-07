@@ -123,8 +123,10 @@ app.get('/chats', auth, (req, res) => {
     id: chat.id,
     phone: chat.id.split('@')[0],
     preview: chat.lastMsg || '',
-    time: chat.ts ? new Date(chat.ts).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit'    name: waContacts.get(chat.id) || chat.name || chat.id.split('@')[0],      name: waContacts.get(chat.id) || null,
-      isGroup: chat.id.endsWith('@g.us'),
+    time: chat.ts ? new Date(chat.ts).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' }) : '',
+    unread: chat.unread || 0,
+    name: waContacts.get(chat.id) || chat.name || chat.id.split('@')[0],
+        isGroup: chat.id.endsWith('@g.us'),
       avatar: waAvatars.get(chat.id) || null,
       lifecycle: waLifecycle.get(chat.id) || null,
   }));
