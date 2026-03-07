@@ -121,17 +121,30 @@ app.get('/chats', auth, (req, res) => {
   const sorted = [...withMsgs.sort(sortTs), ...withoutMsgs.sort(sortTs)].slice(0, 100);
   const list = sorted.map(chat => ({
     id: chat.id,
-    name: chat.name || chat.id.split('@')[0],
     phone: chat.id.split('@')[0],
     preview: chat.lastMsg || '',
-    time: chat.ts ? new Date(chat.ts).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' }) : '',
-    unread: chat.unread || 0,
-        name: waContacts.get(chat.id) || null,
+    time: chat.ts ? new Date(chat.ts).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit'    name: waContacts.get(chat.id) || chat.name || chat.id.split('@')[0],      name: waContacts.get(chat.id) || null,
       isGroup: chat.id.endsWith('@g.us'),
       avatar: waAvatars.get(chat.id) || null,
       lifecycle: waLifecycle.get(chat.id) || null,
   }));
-  res.json({ chats: list });
+  res.json({ chaapp.get('/chats/:id/photo', auth, async (req, res) => {
+  const jid = decodeURIComponent(req.params.id);
+  if (waAvatars.has(jid)) {
+    const cached = waAvatars.get(jid);
+    return res.json({ ok: !!cached, photoUrl: cached || null });
+  }
+  try {
+    if (!sock || waStatus !== 'connected') return res.json({ ok: false, photoUrl: null });
+    const url = await sock.profilePictureUrl(jid, 'image').catch(() => null);
+    waAvatars.set(jid, url);
+    res.json({ ok: !!url, photoUrl: url || null });
+  } catch(e) {
+    waAvatars.set(jid, null);
+    res.json({ ok: false, photoUrl: null });
+  }
+});
+ts: list });
 });
 app.get('/messages/:id', auth, (req, res) => {
   const jid = decodeURIComponent(req.params.id);
