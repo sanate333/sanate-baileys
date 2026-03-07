@@ -130,7 +130,9 @@ app.get('/chats', auth, (req, res) => {
       avatar: waAvatars.get(chat.id) || null,
       lifecycle: waLifecycle.get(chat.id) || null,
   }));
-  res.json({ chaapp.get('/chats/:id/photo', auth, async (req, res) => {
+  res.json({ chats: list });
+  });
+  app.get('/chats/:id/photo', auth, async (req, res) => {
   const jid = decodeURIComponent(req.params.id);
   if (waAvatars.has(jid)) {
     const cached = waAvatars.get(jid);
