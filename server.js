@@ -24,6 +24,9 @@ const waChats = new Map();
 const waMessages = new Map();
 const waAvatars = new Map();
 const waLifecycle = new Map();
+const waContacts = new Map();
+const waSentWelcome = new Set();
+let waWelcomeTemplate = '';
 
 function storeMsg(msg) {
   try {
@@ -66,6 +69,17 @@ async function connectToWhatsApp() {
       for (const msg of messages) storeMsg(msg);
       console.log('messages.upsert type=' + type + ' count=' + messages.length + ' chats=' + waChats.size);
     });
+  messages.forEach(m => {
+    if(m.pushName && m.key?.remoteJid) waContacts.set(m.key.remoteJid, m.pushName);
+    const fromJid = m.key?.remoteJid;
+    if(fromJid && !fromJid.endsWith('@g.us') && !m.key?.fromMe && waWelcomeTemplate && !waSentWelcome.has(fromJid)) {
+      const msgs = waMessages.get(fromJid) || [];
+      if(msgs.length <= 1) {
+        waSentWelcome.add(fromJid);
+        setTimeout(() => { if(sock && waStatus==='connected') sock.sendMessage(fromJid,{text:waWelcomeTemplate}).catch(()=>{}); }, 2000);
+      }
+    }
+  });
     sock.ev.on('messaging-history.set', ({ chats, messages, isLatest }) => {
       console.log('history.set: ' + chats.length + ' chats ' + messages.length + ' msgs isLatest=' + isLatest);
       const cutoff = Date.now() - WA_HISTORY_DAYS * 86400000;
@@ -84,6 +98,9 @@ async function connectToWhatsApp() {
       }
     });
   } catch (err) { console.error('connectToWhatsApp error:', err.message); if (reconnectTimer) clearTimeout(reconnectTimer); reconnectTimer = setTimeout(connectToWhatsApp, 8000); }
+  sock.ev.on('contacts.upsert', contacts => {
+    contacts.forEach(c => { if(c.notify||c.name) waContacts.set(c.id, c.notify||c.name); });
+  });
 }
 
 const auth = (req, res, next) => { const s = req.headers['x-secret'] || req.query.secret; if (s !== SECRET) return res.status(401).json({ error: 'No autorizado' }); next(); };
@@ -109,6 +126,7 @@ app.get('/chats', auth, (req, res) => {
     preview: chat.lastMsg || '',
     time: chat.ts ? new Date(chat.ts).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' }) : '',
     unread: chat.unread || 0,
+        name: waContacts.get(chat.id) || null,
       isGroup: chat.id.endsWith('@g.us'),
       avatar: waAvatars.get(chat.id) || null,
       lifecycle: waLifecycle.get(chat.id) || null,
@@ -158,11 +176,30 @@ app.get('/avatar/:id', auth, async (req, res) => {
     res.json({ url });
   } catch(e) { waAvatars.set(jid, null); res.json({ url: null }); }
 });
+app.get('/welcome', auth, (req, res) => res.json({ template: waWelcomeTemplate }));
+app.post('/welcome', auth, (req, res) => {
+  const { template } = req.body;
+  if(template === undefined) return res.status(400).json({ error: 'template requerido' });
+  waWelcomeTemplate = template; waSentWelcome.clear();
+  res.json({ ok: true });
+});
+app.get('/analyze/:jid', auth, (req, res) => {
+  const jid = decodeURIComponent(req.params.jid);
+  const msgs = waMessages.get(jid) || [];
+  if(!msgs.length) return res.json({ stage: 'nuevo', reason: 'Sin mensajes' });
+  const allText = msgs.map(m=>m.text||'').join(' ').toLowerCase();
+  let stage='nuevo', reason='Contacto nuevo';
+  if(/compr[eé]|pedido|pagu[eé]|confirmar|recib[ií]/.test(allText)){stage='cliente';reason='Realizó una compra';}
+  else if(/precio|cu[aá]nto|costo|cuesta|informaci[oó]n|interesa|quiero|disponible/.test(allText)){stage='potencial';reason='Mostró interés';}
+  else if(msgs.length>0){const last=msgs[msgs.length-1];const days=(Date.now()-(last.timestamp||0))/(864e5);if(days>7){stage='perdido';reason='Sin respuesta 7+ días';}else{stage='potencial';reason='En conversación';}}
+  res.json({ stage, reason });
+});
 app.post('/logout', auth, async (req, res) => {
   if (sock) { try { await sock.logout(); } catch (e) {} }
   waStatus = 'disconnected'; currentQR = null; waChats.clear(); waMessages.clear();
   waAvatars.clear();
   waLifecycle.clear();
+      waContacts.clear(); waSentWelcome.clear();
   if (reconnectTimer) clearTimeout(reconnectTimer);
   if (fs2.existsSync(AUTH_DIR)) fs2.rmSync(AUTH_DIR, { recursive: true });
   res.json({ ok: true });
