@@ -36,15 +36,36 @@ function storeMsg(msg) {
     const jid = msg.key && msg.key.remoteJid;
     if (!jid || jid === 'status@broadcast') return;
     const m = msg.message || {};
-    const body = m.conversation || (m.extendedTextMessage && m.extendedTextMessage.text) || (m.imageMessage && (m.imageMessage.caption || '[Imagen]')) || (m.videoMessage && (m.videoMessage.caption || '[Video]')) || (m.audioMessage && '[Audio]') || (m.documentMessage && '[Documento]') || (m.stickerMessage && '[Sticker]') || '[Mensaje]';
+    const body = m.conversation ||
+      (m.extendedTextMessage && m.extendedTextMessage.text) ||
+      (m.imageMessage && (m.imageMessage.caption || '[Imagen]')) ||
+      (m.videoMessage && (m.videoMessage.caption || '[Video]')) ||
+      (m.audioMessage && '[Audio]') ||
+      (m.documentMessage && '[Documento]') ||
+      (m.stickerMessage && '[Sticker]') ||
+      '[Mensaje]';
     const name = msg.pushName || (waChats.get(jid) && waChats.get(jid).name) || jid.split('@')[0];
     const prev = waChats.get(jid) || {};
-    waChats.set(jid, { id: jid, name, unread: (prev.unread || 0) + (msg.key && msg.key.fromMe ? 0 : 1), lastMsg: body, ts: ts || prev.ts || Date.now() });
+    waChats.set(jid, {
+      id: jid,
+      name,
+      unread: (prev.unread || 0) + (msg.key && msg.key.fromMe ? 0 : 1),
+      lastMsg: body,
+      ts: ts || prev.ts || Date.now()
+    });
     const arr = waMessages.get(jid) || [];
-    arr.push({ id: msg.key && msg.key.id, fromMe: !!(msg.key && msg.key.fromMe), body, ts, type: Object.keys(m)[0] || 'unknown' });
+    arr.push({
+      id: msg.key && msg.key.id,
+      fromMe: !!(msg.key && msg.key.fromMe),
+      body,
+      ts,
+      type: Object.keys(m)[0] || 'unknown'
+    });
     if (arr.length > 200) arr.splice(0, arr.length - 200);
     waMessages.set(jid, arr);
-  } catch (e) { console.error('storeMsg error:', e.message); }
+  } catch (e) {
+    console.error('storeMsg error:', e.message);
+  }
 }
 
 async function connectToWhatsApp() {
@@ -52,67 +73,127 @@ async function connectToWhatsApp() {
     if (!fs2.existsSync(AUTH_DIR)) fs2.mkdirSync(AUTH_DIR, { recursive: true });
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
     const { version } = await fetchLatestBaileysVersion();
-    sock = makeWASocket({ version, auth: state, printQRInTerminal: false, logger: pino({ level: 'silent' }), browser: ['Chrome (Windows)', 'Chrome', '121.0.0'], markOnlineOnConnect: false, connectTimeoutMs: 60000, defaultQueryTimeoutMs: 60000, keepAliveIntervalMs: 25000, syncFullHistory: false });
+    sock = makeWASocket({
+      version,
+      auth: state,
+      printQRInTerminal: false,
+      logger: pino({ level: 'silent' }),
+      browser: ['Windows', 'Chrome', '121.0.0'],
+      markOnlineOnConnect: false,
+      connectTimeoutMs: 60000,
+      defaultQueryTimeoutMs: 60000,
+      keepAliveIntervalMs: 25000,
+      syncFullHistory: false
+    });
+
     sock.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect, qr } = update;
       if (qr) { currentQR = qr; waStatus = 'qr'; console.log('QR listo'); }
       if (connection === 'close') {
-        waStatus = 'disconnected'; currentQR = null;
+        waStatus = 'disconnected';
+        currentQR = null;
         const code = lastDisconnect && lastDisconnect.error && lastDisconnect.error.output && lastDisconnect.error.output.statusCode;
-        if (code !== DisconnectReason.loggedOut) { if (reconnectTimer) clearTimeout(reconnectTimer); reconnectTimer = setTimeout(connectToWhatsApp, 5000); }
+        if (code !== DisconnectReason.loggedOut) {
+          if (reconnectTimer) clearTimeout(reconnectTimer);
+          reconnectTimer = setTimeout(connectToWhatsApp, 5000);
+        }
       }
-      if (connection === 'open') { waStatus = 'connected'; currentQR = null; console.log('Conectado! Chats:', waChats.size); }
+      if (connection === 'open') {
+        waStatus = 'connected';
+        currentQR = null;
+        console.log('Conectado! Chats:', waChats.size);
+      }
     });
+
     sock.ev.on('creds.update', saveCreds);
+
     sock.ev.on('messages.upsert', ({ messages, type }) => {
       if (type !== 'notify' && type !== 'append') return;
       for (const msg of messages) storeMsg(msg);
       console.log('messages.upsert type=' + type + ' count=' + messages.length + ' chats=' + waChats.size);
+      messages.forEach(m => {
+        if (m.pushName && m.key && m.key.remoteJid) waContacts.set(m.key.remoteJid, m.pushName);
+        const fromJid = m.key && m.key.remoteJid;
+        if (fromJid && !fromJid.endsWith('@g.us') && m.key && !m.key.fromMe && waWelcomeTemplate && !waSentWelcome.has(fromJid)) {
+          const msgs = waMessages.get(fromJid) || [];
+          if (msgs.length <= 1) {
+            waSentWelcome.add(fromJid);
+            setTimeout(() => {
+              if (sock && waStatus === 'connected') sock.sendMessage(fromJid, { text: waWelcomeTemplate }).catch(() => {});
+            }, 2000);
+          }
+        }
+      });
     });
-  messages.forEach(m => {
-    if(m.pushName && m.key?.remoteJid) waContacts.set(m.key.remoteJid, m.pushName);
-    const fromJid = m.key?.remoteJid;
-    if(fromJid && !fromJid.endsWith('@g.us') && !m.key?.fromMe && waWelcomeTemplate && !waSentWelcome.has(fromJid)) {
-      const msgs = waMessages.get(fromJid) || [];
-      if(msgs.length <= 1) {
-        waSentWelcome.add(fromJid);
-        setTimeout(() => { if(sock && waStatus==='connected') sock.sendMessage(fromJid,{text:waWelcomeTemplate}).catch(()=>{}); }, 2000);
-      }
-    }
-  });
+
     sock.ev.on('messaging-history.set', ({ chats, messages, isLatest }) => {
       console.log('history.set: ' + chats.length + ' chats ' + messages.length + ' msgs isLatest=' + isLatest);
       const cutoff = Date.now() - WA_HISTORY_DAYS * 86400000;
       for (const chat of chats) {
         if (!chat.id || chat.id === 'status@broadcast') continue;
-        if (!waChats.has(chat.id)) waChats.set(chat.id, { id: chat.id, name: chat.name || chat.id.split('@')[0], unread: chat.unreadCount || 0, lastMsg: '', ts: Date.now() });
+        if (!waChats.has(chat.id)) waChats.set(chat.id, {
+          id: chat.id,
+          name: chat.name || chat.id.split('@')[0],
+          unread: chat.unreadCount || 0,
+          lastMsg: '',
+          ts: Date.now()
+        });
       }
-      for (const msg of messages) { const ts = (msg.messageTimestamp || 0) * 1000; if (ts && ts < cutoff) continue; storeMsg(msg); }
+      for (const msg of messages) {
+        const ts = (msg.messageTimestamp || 0) * 1000;
+        if (ts && ts < cutoff) continue;
+        storeMsg(msg);
+      }
       console.log('After history: chats=' + waChats.size + ' jids=' + waMessages.size);
     });
+
     sock.ev.on('chats.upsert', (chats) => {
       for (const chat of chats) {
         if (!chat.id || chat.id === 'status@broadcast') continue;
         const prev = waChats.get(chat.id) || {};
-        waChats.set(chat.id, { ...prev, id: chat.id, name: chat.name || prev.name || chat.id.split('@')[0], unread: chat.unreadCount !== undefined ? chat.unreadCount : (prev.unread || 0), ts: prev.ts || Date.now() });
+        waChats.set(chat.id, {
+          ...prev,
+          id: chat.id,
+          name: chat.name || prev.name || chat.id.split('@')[0],
+          unread: chat.unreadCount !== undefined ? chat.unreadCount : (prev.unread || 0),
+          ts: prev.ts || Date.now()
+        });
       }
     });
-  } catch (err) { console.error('connectToWhatsApp error:', err.message); if (reconnectTimer) clearTimeout(reconnectTimer); reconnectTimer = setTimeout(connectToWhatsApp, 8000); }
-  sock.ev.on('contacts.upsert', contacts => {
-    contacts.forEach(c => { if(c.notify||c.name) waContacts.set(c.id, c.notify||c.name); });
-  });
+
+    sock.ev.on('contacts.upsert', contacts => {
+      contacts.forEach(c => {
+        if (c.notify || c.name) waContacts.set(c.id, c.notify || c.name);
+      });
+    });
+
+  } catch (err) {
+    console.error('connectToWhatsApp error:', err.message);
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(connectToWhatsApp, 8000);
+  }
 }
 
-const auth = (req, res, next) => { const s = req.headers['x-secret'] || req.query.secret; if (s !== SECRET) return res.status(401).json({ error: 'No autorizado' }); next(); };
+const auth = (req, res, next) => {
+  const s = req.headers['x-secret'] || req.query.secret;
+  if (s !== SECRET) return res.status(401).json({ error: 'No autorizado' });
+  next();
+};
 
 app.get('/health', (req, res) => res.json({ ok: true, status: waStatus, hasQR: !!currentQR }));
-app.get('/ping',   (req, res) => res.json({ v: '2.3', chats: waChats.size, msgs: waMessages.size, status: waStatus, ts: Date.now() }));
+app.get('/ping', (req, res) => res.json({ v: '2.5', chats: waChats.size, msgs: waMessages.size, status: waStatus, ts: Date.now() }));
 app.get('/status', auth, (req, res) => res.json({ status: waStatus, hasQR: !!currentQR }));
+
 app.get('/qr', auth, async (req, res) => {
   if (!currentQR) return res.json({ qr: null, status: waStatus });
-  try { const qrDataUrl = await qrcode.toDataURL(currentQR, { width: 500, margin: 2, errorCorrectionLevel: 'M' }); res.json({ qr: qrDataUrl, status: waStatus }); }
-  catch (e) { res.status(500).json({ error: e.message }); }
+  try {
+    const qrDataUrl = await qrcode.toDataURL(currentQR, { width: 500, margin: 2, errorCorrectionLevel: 'M' });
+    res.json({ qr: qrDataUrl, status: waStatus });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
+
 app.get('/chats', auth, (req, res) => {
   const all = Array.from(waChats.values());
   const withMsgs = all.filter(c => waMessages.has(c.id));
@@ -126,13 +207,14 @@ app.get('/chats', auth, (req, res) => {
     time: chat.ts ? new Date(chat.ts).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' }) : '',
     unread: chat.unread || 0,
     name: waContacts.get(chat.id) || chat.name || chat.id.split('@')[0],
-        isGroup: chat.id.endsWith('@g.us'),
-      avatar: waAvatars.get(chat.id) || null,
-      lifecycle: waLifecycle.get(chat.id) || null,
+    isGroup: chat.id.endsWith('@g.us'),
+    avatar: waAvatars.get(chat.id) || null,
+    lifecycle: waLifecycle.get(chat.id) || null,
   }));
   res.json({ chats: list });
-  });
-  app.get('/chats/:id/photo', auth, async (req, res) => {
+});
+
+app.get('/chats/:id/photo', auth, async (req, res) => {
   const jid = decodeURIComponent(req.params.id);
   if (waAvatars.has(jid)) {
     const cached = waAvatars.get(jid);
@@ -143,16 +225,20 @@ app.get('/chats', auth, (req, res) => {
     const url = await sock.profilePictureUrl(jid, 'image').catch(() => null);
     waAvatars.set(jid, url);
     res.json({ ok: !!url, photoUrl: url || null });
-  } catch(e) {
+  } catch (e) {
     waAvatars.set(jid, null);
     res.json({ ok: false, photoUrl: null });
   }
 });
+
 app.get('/messages/:id', auth, (req, res) => {
   const jid = decodeURIComponent(req.params.id);
   let msgs = waMessages.get(jid) || [];
   if (!msgs.length && !jid.includes('@')) msgs = waMessages.get(jid + '@s.whatsapp.net') || [];
-  if (waChats.has(jid)) { const c = waChats.get(jid); waChats.set(jid, { ...c, unread: 0 }); }
+  if (waChats.has(jid)) {
+    const c = waChats.get(jid);
+    waChats.set(jid, { ...c, unread: 0 });
+  }
   const formatted = msgs.slice(-50).map(msg => ({
     id: msg.id,
     dir: msg.fromMe ? 's' : 'r',
@@ -162,17 +248,25 @@ app.get('/messages/:id', auth, (req, res) => {
   }));
   res.json({ messages: formatted });
 });
+
 app.post('/send', auth, async (req, res) => {
   const { to, message } = req.body;
   if (!sock || waStatus !== 'connected') return res.status(400).json({ error: 'No conectado' });
-  try { const jid = to.includes('@') ? to : to + '@s.whatsapp.net'; await sock.sendMessage(jid, { text: message }); res.json({ ok: true }); }
-  catch (e) { res.status(500).json({ error: e.message }); }
+  try {
+    const jid = to.includes('@') ? to : to + '@s.whatsapp.net';
+    await sock.sendMessage(jid, { text: message });
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
+
 app.get('/lifecycle', auth, (req, res) => {
   const all = {};
   waLifecycle.forEach((v, k) => { all[k] = v; });
   res.json({ lifecycle: all });
 });
+
 app.post('/lifecycle', auth, (req, res) => {
   const { jid, stage } = req.body;
   if (!jid || !stage) return res.status(400).json({ error: 'jid y stage requeridos' });
@@ -181,6 +275,7 @@ app.post('/lifecycle', auth, (req, res) => {
   waLifecycle.set(jid, { stage, updatedAt: Date.now() });
   res.json({ ok: true });
 });
+
 app.get('/avatar/:id', auth, async (req, res) => {
   const jid = decodeURIComponent(req.params.id);
   if (waAvatars.has(jid)) return res.json({ url: waAvatars.get(jid) });
@@ -189,35 +284,56 @@ app.get('/avatar/:id', auth, async (req, res) => {
     const url = await sock.profilePictureUrl(jid, 'image').catch(() => null);
     waAvatars.set(jid, url);
     res.json({ url });
-  } catch(e) { waAvatars.set(jid, null); res.json({ url: null }); }
+  } catch (e) {
+    waAvatars.set(jid, null);
+    res.json({ url: null });
+  }
 });
+
 app.get('/welcome', auth, (req, res) => res.json({ template: waWelcomeTemplate }));
+
 app.post('/welcome', auth, (req, res) => {
   const { template } = req.body;
-  if(template === undefined) return res.status(400).json({ error: 'template requerido' });
-  waWelcomeTemplate = template; waSentWelcome.clear();
+  if (template === undefined) return res.status(400).json({ error: 'template requerido' });
+  waWelcomeTemplate = template;
+  waSentWelcome.clear();
   res.json({ ok: true });
 });
+
 app.get('/analyze/:jid', auth, (req, res) => {
   const jid = decodeURIComponent(req.params.jid);
   const msgs = waMessages.get(jid) || [];
-  if(!msgs.length) return res.json({ stage: 'nuevo', reason: 'Sin mensajes' });
-  const allText = msgs.map(m=>m.text||'').join(' ').toLowerCase();
-  let stage='nuevo', reason='Contacto nuevo';
-  if(/compr[eé]|pedido|pagu[eé]|confirmar|recib[ií]/.test(allText)){stage='cliente';reason='Realizó una compra';}
-  else if(/precio|cu[aá]nto|costo|cuesta|informaci[oó]n|interesa|quiero|disponible/.test(allText)){stage='potencial';reason='Mostró interés';}
-  else if(msgs.length>0){const last=msgs[msgs.length-1];const days=(Date.now()-(last.timestamp||0))/(864e5);if(days>7){stage='perdido';reason='Sin respuesta 7+ días';}else{stage='potencial';reason='En conversación';}}
+  if (!msgs.length) return res.json({ stage: 'nuevo', reason: 'Sin mensajes' });
+  const allText = msgs.map(m => m.text || '').join(' ').toLowerCase();
+  let stage = 'nuevo', reason = 'Contacto nuevo';
+  if (/compr[eé]|pedido|pagu[eé]|confirmar|recib[ií]/.test(allText)) { stage = 'cliente'; reason = 'Realizó una compra'; }
+  else if (/precio|cu[aá]nto|costo|cuesta|informaci[oó]n|interesa|quiero|disponible/.test(allText)) { stage = 'potencial'; reason = 'Mostró interés'; }
+  else if (msgs.length > 0) {
+    const last = msgs[msgs.length - 1];
+    const days = (Date.now() - (last.timestamp || 0)) / (864e5);
+    if (days > 7) { stage = 'perdido'; reason = 'Sin respuesta 7+ días'; }
+    else { stage = 'potencial'; reason = 'En conversación'; }
+  }
   res.json({ stage, reason });
 });
+
 app.post('/logout', auth, async (req, res) => {
   if (sock) { try { await sock.logout(); } catch (e) {} }
-  waStatus = 'disconnected'; currentQR = null; waChats.clear(); waMessages.clear();
+  waStatus = 'disconnected';
+  currentQR = null;
+  waChats.clear();
+  waMessages.clear();
   waAvatars.clear();
   waLifecycle.clear();
-      waContacts.clear(); waSentWelcome.clear();
+  waContacts.clear();
+  waSentWelcome.clear();
   if (reconnectTimer) clearTimeout(reconnectTimer);
   if (fs2.existsSync(AUTH_DIR)) fs2.rmSync(AUTH_DIR, { recursive: true });
   res.json({ ok: true });
   reconnectTimer = setTimeout(connectToWhatsApp, 2000);
 });
-app.listen(PORT, () => { console.log('Puerto:', PORT); connectToWhatsApp(); });
+
+app.listen(PORT, () => {
+  console.log('Puerto:', PORT);
+  connectToWhatsApp();
+});
