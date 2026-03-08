@@ -19,7 +19,7 @@ function getDevice(id) {
   const did = String(id || 'default');
   if (!devices.has(did)) {
     devices.set(did, {
-      id: did, sock: null, status: 'disconnected', qr: null, reconnectTimer: null,
+      id: did, sock: null, status: 'disconnected', qr: null, reconnectTimer: null, sseClients: new Set(),
       waChats: new Map(), waMessages: new Map(), waAvatars: new Map(),
       waLifecycle: new Map(), waContacts: new Map(), waSentWelcome: new Set(), waWelcomeTemplate: '',
     });
@@ -27,6 +27,13 @@ function getDevice(id) {
   return devices.get(did);
 }
 getDevice('default');
+
+function broadcastSSE(dev, event, data) {
+  const msg = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  for (const client of dev.sseClients) {
+    try { client.write(msg); } catch(e) { dev.sseClients.delete(client); }
+  }
+}
 
 // ââ Contact persistence ââââââââââââââââââââââââââââââââââââââââââ
 function contactsFile(deviceId) { return './contacts_' + deviceId + '.json'; }
@@ -138,6 +145,7 @@ function storeMsg(dev, msg) {
     if (msg.pushName) { dev.waContacts.set(jid, msg.pushName); }
     const prev = dev.waChats.get(jid) || {};
     dev.waChats.set(jid, { id:jid, name, unread:(prev.unread||0)+(msg.key?.fromMe?0:1), lastMsg:body, ts:ts||prev.ts||Date.now() });
+      broadcastSSE(dev, 'chat_update', { id: jid, name, lastMsg: body, ts: ts||prev.ts||Date.now(), unread: (prev.unread||0)+(msg.key?.fromMe?0:1) });
     const arr = dev.waMessages.get(jid) || [];
     arr.push({ id:msg.key?.id, fromMe:!!msg.key?.fromMe, body, ts, type:Object.keys(m)[0]||'unknown', mediaUrl:m.imageMessage?.url||m.videoMessage?.url||null, mimetype:m.imageMessage?.mimetype||m.videoMessage?.mimetype||null });
     if (arr.length>200) arr.splice(0,arr.length-200);
@@ -165,10 +173,12 @@ async function connectDevice(deviceId) {
       if (qr) { dev.qr=qr; dev.status='qr'; }
       if (connection==='close') {
         dev.status='disconnected'; dev.qr=null;
+      broadcastSSE(dev, 'status', { status: 'disconnected' });
         const code=lastDisconnect?.error?.output?.statusCode;
         if (code!==DisconnectReason.loggedOut) { if (dev.reconnectTimer) clearTimeout(dev.reconnectTimer); dev.reconnectTimer=setTimeout(()=>connectDevice(deviceId),5000); }
       }
-      if (connection==='open') { dev.status='connected'; dev.qr=null; console.log('Conectado device='+deviceId+' chats='+dev.waChats.size); }
+      if (connection==='open') { dev.status='connected'; dev.qr=null;
+      broadcastSSE(dev, 'status', { status: 'connected' }); console.log('Conectado device='+deviceId+' chats='+dev.waChats.size); }
     });
     dev.sock.ev.on('creds.update', saveCreds);
     dev.sock.ev.on('messages.upsert', ({ messages, type }) => {
@@ -258,6 +268,19 @@ app.delete('/devices/:deviceId', auth, async (req,res) => {
 });
 
 // ââ Status / QR ââââââââââââââââââââââââââââââââââââââââââââââââââ
+app.get('/events', auth, (req, res) => {
+  const did = req.query.deviceId || 'default';
+  const dev = devices.get(did);
+  if (!dev) return res.status(404).end();
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+  dev.sseClients.add(res);
+  const keepAlive = setInterval(() => { try { res.write(':ping\n\n'); } catch(e) {} }, 25000);
+  req.on('close', () => { clearInterval(keepAlive); dev.sseClients.delete(res); });
+});
+
 app.get('/status', auth, (req,res) => { const d=getDevice(req.query.deviceId||'default'); res.json({status:d.status,hasQR:!!d.qr}); });
 app.get('/qr', auth, async (req,res) => {
   const d=getDevice(req.query.deviceId||'default');
