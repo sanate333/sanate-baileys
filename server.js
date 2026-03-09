@@ -12,6 +12,7 @@ const SECRET = process.env.SECRET || process.env.BAILEYS_SECRET || 'sanate_secre
 const PORT = process.env.PORT || 3000;
 const WA_HISTORY_DAYS = 15;
 const MAX_DEVICES = 10;
+let currentSettings = { backendPublicUrl: '', n8nEnabled: false, n8nUrl: '', openaiKey: '', prompt: '' };
 
 // ââ Multi-device store âââââââââââââââââââââââââââââââââââââââââââ
 const devices = new Map();
@@ -448,6 +449,27 @@ app.post('/logout', auth, async (req,res) => {
 });
 
 // ââ Start âââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+// GET /settings
+app.get('/settings', (req, res) => {
+  res.json(currentSettings);
+});
+
+// POST /settings
+app.post('/settings', (req, res) => {
+  try {
+    const { backendPublicUrl, n8nEnabled, n8nUrl, openaiKey, prompt } = req.body || {};
+    if (backendPublicUrl !== undefined) currentSettings.backendPublicUrl = backendPublicUrl;
+    if (n8nEnabled !== undefined) currentSettings.n8nEnabled = n8nEnabled;
+    if (n8nUrl !== undefined) currentSettings.n8nUrl = n8nUrl;
+    if (openaiKey !== undefined) currentSettings.openaiKey = openaiKey;
+    if (prompt !== undefined) currentSettings.prompt = prompt;
+    console.log('[settings] updated:', currentSettings);
+    res.json({ ok: true, settings: currentSettings });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log('Puerto:', PORT, '| v3.1 multi-device + contact persistence + openai leads');
   loadJobs();
