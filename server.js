@@ -15,7 +15,7 @@ const WA_HISTORY_DAYS = 15;
 const MAX_DEVICES = 10;
 let currentSettings = { backendPublicUrl: '', n8nEnabled: false, n8nUrl: '', openaiKey: '', prompt: '' };
 
-// ââ Multi-device store âââââââââââââââââââââââââââââââââââââââââââ
+// Ã¢ÂÂÃ¢ÂÂ Multi-device store Ã¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂ
 const devices = new Map();
 function getDevice(id) {
   const did = String(id || 'default');
@@ -37,7 +37,7 @@ function broadcastSSE(dev, event, data) {
   }
 }
 
-// ââ Contact persistence ââââââââââââââââââââââââââââââââââââââââââ
+// Ã¢ÂÂÃ¢ÂÂ Contact persistence Ã¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂ
 function contactsFile(deviceId) { return './contacts_' + deviceId + '.json'; }
 function saveContacts(dev) {
   try {
@@ -57,7 +57,7 @@ function loadContacts(dev) {
   } catch(e) { console.error('loadContacts:', e.message); }
 }
 
-// ââ OpenAI auto-lead classification âââââââââââââââââââââââââââââ
+// Ã¢ÂÂÃ¢ÂÂ OpenAI auto-lead classification Ã¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂ
 async function autoClassifyLead(dev, jid) {
   try {
     const msgs = dev.waMessages.get(jid) || [];
@@ -77,7 +77,7 @@ async function autoClassifyLead(dev, jid) {
           body: JSON.stringify({
             model: 'gpt-3.5-turbo',
             messages: [
-              { role: 'system', content: 'Eres un clasificador de leads de WhatsApp. Analiza la conversaciÃ³n y responde SOLO con una de estas palabras: nuevo, potencial, cliente, perdido. Reglas: nuevo=primer contacto o saludo inicial, potencial=mostrÃ³ interÃ©s en productos/precios, cliente=realizÃ³ una compra o confirmÃ³ pedido, perdido=sin interÃ©s o inactivo mÃ¡s de 7 dÃ­as.' },
+              { role: 'system', content: 'Eres un clasificador de leads de WhatsApp. Analiza la conversaciÃÂ³n y responde SOLO con una de estas palabras: nuevo, potencial, cliente, perdido. Reglas: nuevo=primer contacto o saludo inicial, potencial=mostrÃÂ³ interÃÂ©s en productos/precios, cliente=realizÃÂ³ una compra o confirmÃÂ³ pedido, perdido=sin interÃÂ©s o inactivo mÃÂ¡s de 7 dÃÂ­as.' },
               { role: 'user', content: recentMsgs }
             ],
             max_tokens: 10, temperature: 0,
@@ -89,15 +89,15 @@ async function autoClassifyLead(dev, jid) {
       } catch(e) { /* fall through to regex */ }
     }
     if (source === 'regex') {
-      if (/compr[eÃ©]|pedido|pagu[eÃ©]|confirmar|recib[iÃ­]|comprÃ³|compre/.test(allText)) { stage = 'cliente'; }
-      else if (/precio|cu[aÃ¡]nto|costo|cuesta|informaci[oÃ³]n|interesa|quiero|disponible|cÃ³mo funciona|mÃ¡s info/.test(allText)) { stage = 'potencial'; }
+      if (/compr[eÃÂ©]|pedido|pagu[eÃÂ©]|confirmar|recib[iÃÂ­]|comprÃÂ³|compre/.test(allText)) { stage = 'cliente'; }
+      else if (/precio|cu[aÃÂ¡]nto|costo|cuesta|informaci[oÃÂ³]n|interesa|quiero|disponible|cÃÂ³mo funciona|mÃÂ¡s info/.test(allText)) { stage = 'potencial'; }
       else { const last = msgs[msgs.length-1]; const days = (Date.now()-(last.ts||0))/864e5; stage = days>7?'perdido':'potencial'; }
     }
     dev.waLifecycle.set(jid, { stage, updatedAt: Date.now(), source });
   } catch(e) { console.error('autoClassifyLead:', e.message); }
 }
 
-// ââ Broadcast queue ââââââââââââââââââââââââââââââââââââââââââââââ
+// Ã¢ÂÂÃ¢ÂÂ Broadcast queue Ã¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂ
 const broadcastJobs = new Map();
 const JOBS_FILE = './broadcast_jobs.json';
 function saveJobs() { try { fs2.writeFileSync(JOBS_FILE, JSON.stringify(Array.from(broadcastJobs.entries())), 'utf8'); } catch(e){} }
@@ -127,7 +127,7 @@ setInterval(async () => {
   }
 }, 4000);
 
-// ââ storeMsg âââââââââââââââââââââââââââââââââââââââââââââââââââââ
+// Ã¢ÂÂÃ¢ÂÂ storeMsg Ã¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂ
 function storeMsg(dev, msg) {
   try {
     const cutoff = Date.now() - WA_HISTORY_DAYS*86400000;
@@ -155,7 +155,7 @@ function storeMsg(dev, msg) {
   } catch(e){ console.error('storeMsg:', e.message); }
 }
 
-// ââ connectDevice ââââââââââââââââââââââââââââââââââââââââââââââââ
+// Ã¢ÂÂÃ¢ÂÂ connectDevice Ã¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂ
 async function connectDevice(deviceId) {
   const dev = getDevice(deviceId);
   try {
@@ -242,19 +242,19 @@ async function connectDevice(deviceId) {
   }
 }
 
-// ââ Auth middleware ââââââââââââââââââââââââââââââââââââââââââââââ
+// Ã¢ÂÂÃ¢ÂÂ Auth middleware Ã¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂ
 const auth = (req,res,next) => { const s=req.headers['x-secret']||req.query.secret; if (s!==SECRET) return res.status(401).json({error:'No autorizado'}); next(); };
 
-// ââ Health / Ping ââââââââââââââââââââââââââââââââââââââââââââââââ
+// Ã¢ÂÂÃ¢ÂÂ Health / Ping Ã¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂ
 app.get('/health', (req,res) => { const d=getDevice('default'); res.json({ok:true,status:d.status,hasQR:!!d.qr}); });
 app.get('/ping', (req,res) => { const d=getDevice('default'); res.json({v:'3.1',chats:d.waChats.size,msgs:d.waMessages.size,status:d.status,ts:Date.now()}); });
 
-// ââ Devices ââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+// Ã¢ÂÂÃ¢ÂÂ Devices Ã¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂ
 app.get('/devices', auth, (req,res) => { res.json({devices:Array.from(devices.entries()).map(([id,d])=>({id,status:d.status,hasQR:!!d.qr,chats:d.waChats.size,contacts:d.waContacts.size}))}); });
 app.post('/devices', auth, async (req,res) => {
   const { deviceId } = req.body;
   if (!deviceId) return res.status(400).json({error:'deviceId requerido'});
-  if (Array.from(devices.keys()).filter(k=>k!=='default').length>=MAX_DEVICES-1) return res.status(400).json({error:'MÃ¡ximo '+MAX_DEVICES+' dispositivos'});
+  if (Array.from(devices.keys()).filter(k=>k!=='default').length>=MAX_DEVICES-1) return res.status(400).json({error:'MÃÂ¡ximo '+MAX_DEVICES+' dispositivos'});
   getDevice(deviceId); await connectDevice(deviceId); res.json({ok:true,deviceId});
 });
 app.delete('/devices/:deviceId', auth, async (req,res) => {
@@ -269,7 +269,7 @@ app.delete('/devices/:deviceId', auth, async (req,res) => {
   devices.delete(deviceId); res.json({ok:true});
 });
 
-// ââ Status / QR ââââââââââââââââââââââââââââââââââââââââââââââââââ
+// Ã¢ÂÂÃ¢ÂÂ Status / QR Ã¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂ
 app.get('/events', auth, (req, res) => {
   const did = req.query.deviceId || 'default';
   const dev = devices.get(did);
@@ -291,13 +291,13 @@ app.get('/qr', auth, async (req,res) => {
   catch(e) { res.status(500).json({error:e.message}); }
 });
 
-// ââ Sync (force reload) ââââââââââââââââââââââââââââââââââââââââââ
+// Ã¢ÂÂÃ¢ÂÂ Sync (force reload) Ã¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂ
 app.post('/sync', auth, (req,res) => {
   const dev = getDevice(req.query.deviceId||req.body?.deviceId||'default');
   res.json({ ok:true, chats:dev.waChats.size, contacts:dev.waContacts.size, messages:dev.waMessages.size });
 });
 
-// ââ Chats âââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+// Ã¢ÂÂÃ¢ÂÂ Chats Ã¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂ
 app.get('/chats', auth, (req,res) => {
   const dev = getDevice(req.query.deviceId||'default');
   const all = Array.from(dev.waChats.values());
@@ -316,7 +316,7 @@ app.get('/chats', auth, (req,res) => {
   }))});
 });
 
-// ââ Messages ââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+// Ã¢ÂÂÃ¢ÂÂ Messages Ã¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂ
 function getMessages(dev, jid) {
   let msgs = dev.waMessages.get(jid)||[];
   if (!msgs.length && !jid.includes('@')) msgs = dev.waMessages.get(jid+'@s.whatsapp.net')||[];
@@ -339,7 +339,7 @@ app.get('/chats/:id/messages', auth, (req,res) => {
   res.json({ messages: getMessages(dev, jid) });
 });
 
-// ââ Send text âââââââââââââââââââââââââââââââââââââââââââââââââââââ
+// Ã¢ÂÂÃ¢ÂÂ Send text Ã¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂ
 app.post('/send', auth, async (req,res) => {
   const { to, message, deviceId } = req.body;
   const dev = getDevice(deviceId||'default');
@@ -348,20 +348,20 @@ app.post('/send', auth, async (req,res) => {
   catch(e) { res.status(500).json({error:e.message}); }
 });
 
-// ââ Send buttons ââââââââââââââââââââââââââââââââââââââââââââââââââ
+// Ã¢ÂÂÃ¢ÂÂ Send buttons Ã¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂ
 app.post('/send-buttons', auth, async (req,res) => {
   const { to, text, footer, buttons, deviceId } = req.body;
   const dev = getDevice(deviceId||'default');
   if (!dev.sock||dev.status!=='connected') return res.status(400).json({error:'No conectado'});
   try {
     const jid=to.includes('@')?to:to.replace(/\D/g,'')+('@s.whatsapp.net');
-    const waButtons=(buttons||[]).map((b,i)=>({buttonId:b.id||String(i+1),buttonText:{displayText:b.text||b.label||('OpciÃ³n '+(i+1))},type:1}));
+    const waButtons=(buttons||[]).map((b,i)=>({buttonId:b.id||String(i+1),buttonText:{displayText:b.text||b.label||('OpciÃÂ³n '+(i+1))},type:1}));
     await dev.sock.sendMessage(jid,{text:text||'',footer:footer||'',buttons:waButtons,headerType:1});
     res.json({ok:true});
   } catch(e) { res.status(500).json({error:e.message}); }
 });
 
-// ââ Send template buttons âââââââââââââââââââââââââââââââââââââââââ
+// Ã¢ÂÂÃ¢ÂÂ Send template buttons Ã¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂ
 app.post('/send-template', auth, async (req,res) => {
   const { to, text, templateButtons, deviceId } = req.body;
   const dev = getDevice(deviceId||'default');
@@ -373,13 +373,13 @@ app.post('/send-template', auth, async (req,res) => {
   } catch(e) { res.status(500).json({error:e.message}); }
 });
 
-// ââ Broadcast âââââââââââââââââââââââââââââââââââââââââââââââââââââ
+// Ã¢ÂÂÃ¢ÂÂ Broadcast Ã¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂ
 app.get('/broadcast', auth, (req,res) => { res.json({jobs:Array.from(broadcastJobs.values()).map(j=>({...j,numbers:undefined,totalNumbers:(j.numbers||[]).length}))}); });
 app.post('/broadcast', auth, (req,res) => {
   const { name, numbers, message, mediaUrl, delayType, deviceId, deviceIds, rotateDevices, rotateEvery, startHour, startMin, endHour, endMin } = req.body;
   if (!numbers?.length||!message) return res.status(400).json({error:'numbers y message requeridos'});
   const jobId='job_'+Date.now();
-  broadcastJobs.set(jobId,{ id:jobId, name:name||('DifusiÃ³n '+new Date().toLocaleDateString('es-ES')), numbers:numbers.map(n=>String(n).replace(/\D/g,'')), message, mediaUrl:mediaUrl||null, delayType:delayType||'short', deviceId:deviceId||'default', deviceIds, rotateDevices:!!rotateDevices, rotateEvery:rotateEvery||3, startHour:startHour??10, startMin:startMin??0, endHour:endHour??18, endMin:endMin??33, status:'running', position:0, sentCount:0, errors:0, createdAt:Date.now(), lastSentAt:null });
+  broadcastJobs.set(jobId,{ id:jobId, name:name||('DifusiÃÂ³n '+new Date().toLocaleDateString('es-ES')), numbers:numbers.map(n=>String(n).replace(/\D/g,'')), message, mediaUrl:mediaUrl||null, delayType:delayType||'short', deviceId:deviceId||'default', deviceIds, rotateDevices:!!rotateDevices, rotateEvery:rotateEvery||3, startHour:startHour??10, startMin:startMin??0, endHour:endHour??18, endMin:endMin??33, status:'running', position:0, sentCount:0, errors:0, createdAt:Date.now(), lastSentAt:null });
   saveJobs(); res.json({ok:true,jobId});
 });
 app.patch('/broadcast/:jobId', auth, (req,res) => {
@@ -390,7 +390,7 @@ app.patch('/broadcast/:jobId', auth, (req,res) => {
 });
 app.delete('/broadcast/:jobId', auth, (req,res) => { broadcastJobs.delete(req.params.jobId); saveJobs(); res.json({ok:true}); });
 
-// ââ Photo âââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+// Ã¢ÂÂÃ¢ÂÂ Photo Ã¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂ
 app.get('/chats/:id/photo', auth, async (req,res) => {
   const dev=getDevice(req.query.deviceId||'default');
   const jid=decodeURIComponent(req.params.id);
@@ -402,7 +402,7 @@ app.get('/chats/:id/photo', auth, async (req,res) => {
   } catch(e) { dev.waAvatars.set(jid,null); res.json({ok:false,photoUrl:null}); }
 });
 
-// ââ Lifecycle âââââââââââââââââââââââââââââââââââââââââââââââââââââ
+// Ã¢ÂÂÃ¢ÂÂ Lifecycle Ã¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂ
 app.get('/lifecycle', auth, (req,res) => {
   const dev=getDevice(req.query.deviceId||'default');
   const all={}; dev.waLifecycle.forEach((v,k)=>{all[k]=v;}); res.json({lifecycle:all});
@@ -415,7 +415,7 @@ app.post('/lifecycle', auth, (req,res) => {
   dev.waLifecycle.set(jid,{stage,updatedAt:Date.now(),source:'manual'}); res.json({ok:true});
 });
 
-// ââ Analyze (manual trigger) ââââââââââââââââââââââââââââââââââââââ
+// Ã¢ÂÂÃ¢ÂÂ Analyze (manual trigger) Ã¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂ
 app.get('/analyze/:jid', auth, async (req,res) => {
   const dev=getDevice(req.query.deviceId||'default');
   const jid=decodeURIComponent(req.params.jid);
@@ -426,10 +426,10 @@ app.get('/analyze/:jid', auth, async (req,res) => {
   dev.waLifecycle.set(jid, { ...prev, source: 'auto' });
   await autoClassifyLead(dev, jid);
   const result = dev.waLifecycle.get(jid) || { stage:'nuevo' };
-  res.json({ stage:result.stage, source:result.source, reason:'Clasificado automÃ¡ticamente' });
+  res.json({ stage:result.stage, source:result.source, reason:'Clasificado automÃÂ¡ticamente' });
 });
 
-// ââ Welcome âââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+// Ã¢ÂÂÃ¢ÂÂ Welcome Ã¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂ
 app.get('/welcome', auth, (req,res) => { res.json({template:getDevice(req.query.deviceId||'default').waWelcomeTemplate}); });
 app.post('/welcome', auth, (req,res) => {
   const { template, deviceId } = req.body;
@@ -437,7 +437,7 @@ app.post('/welcome', auth, (req,res) => {
   const dev=getDevice(deviceId||'default'); dev.waWelcomeTemplate=template; dev.waSentWelcome.clear(); res.json({ok:true});
 });
 
-// ââ Logout ââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+// Ã¢ÂÂÃ¢ÂÂ Logout Ã¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂ
 app.post('/logout', auth, async (req,res) => {
   const id=req.body?.deviceId||'default';
   const dev=getDevice(id);
@@ -449,7 +449,7 @@ app.post('/logout', auth, async (req,res) => {
   res.json({ok:true}); dev.reconnectTimer=setTimeout(()=>connectDevice(id),2000);
 });
 
-// ââ Start âââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+// Ã¢ÂÂÃ¢ÂÂ Start Ã¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂ
 // GET /settings
 app.get('/settings', (req, res) => {
   res.json(currentSettings);
@@ -470,6 +470,10 @@ app.post('/settings', (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// ── Social Routes (Instagram + Messenger multi-store) ──────────────────────
+const { registerSocialRoutes } = require('./social');
+registerSocialRoutes(app, auth);
 
 app.listen(PORT, () => {
   console.log('Puerto:', PORT, '| v3.1 multi-device + contact persistence + openai leads');
