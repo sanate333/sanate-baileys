@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const QRCode = require('qrcode');
 const { getConnectionState, getQR, getProfilePhoto, getContactName, sendMessage, disconnect, getSocket, contactCache } = require('./baileys');
-const { getChats, getMessages } = require('./supabase');
+const { getChats, getMessages, saveMessage, upsertChat } = require('./supabase');
 
 function auth(req, res, next) {
   const openPaths = ['/events', '/status', '/qr', '/settings'];
@@ -16,15 +16,18 @@ function auth(req, res, next) {
   }
   next();
 }
-router.use(auth);
 
+router.use(auth);
 router.get('/status', (req, res) => {
   res.json({
-    status: getConnectionState(), connected: getConnectionState() === 'connected',
-    hasQR: !!getQR(), uptime: Math.floor(process.uptime()),
+    status: getConnectionState(),
+    connected: getConnectionState() === 'connected',
+    hasQR: !!getQR(),
+    uptime: Math.floor(process.uptime()),
     sseClients: req.app.get('sse')?.getStatus()?.clients || 0,
     contactsInCache: contactCache.keys().length,
-    server: 'sanate-wa-server', engine: 'baileys-standalone',
+    server: 'sanate-wa-server',
+    engine: 'baileys-standalone',
     timestamp: new Date().toISOString()
   });
 });
@@ -37,7 +40,9 @@ router.get('/qr', async (req, res) => {
   try {
     const qrImage = await QRCode.toDataURL(qr, { width: 300 });
     res.json({ status: 'qr_ready', qr: qrImage, raw: qr });
-  } catch (err) { res.json({ status: 'qr_ready', qr: null, raw: qr }); }
+  } catch (err) {
+    res.json({ status: 'qr_ready', qr: null, raw: qr });
+  }
 });
 
 router.get('/chats', async (req, res) => {
@@ -45,7 +50,6 @@ router.get('/chats', async (req, res) => {
     const limit = parseInt(req.query.limit) || 100;
     const chats = await getChats(limit);
     const enriched = chats.map(chat => {
-      // Extraer numero limpio del JID
       const jidNum = (chat.jid || '').replace(/@s\.whatsapp\.net|@g\.us|@c\.us|@lid/g, '');
       const phone = chat.phone || (/^\d{7,}$/.test(jidNum) ? '+' + jidNum : '');
       const contactName = getContactName(chat.jid);
@@ -67,7 +71,9 @@ router.get('/chats', async (req, res) => {
       };
     });
     res.json({ chats: enriched, total: enriched.length, source: 'supabase' });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 router.get('/chats/:chatId/messages', async (req, res) => {
@@ -76,7 +82,6 @@ router.get('/chats/:chatId/messages', async (req, res) => {
     const limit = parseInt(req.query.limit) || 50;
     const before = req.query.before || null;
     const messages = await getMessages(chatId, limit, before);
-    // Transformar campos para el frontend (normMsg espera text, direction, type)
     const mapped = messages.map(m => ({
       ...m,
       id: m.message_id || m.id,
@@ -90,7 +95,9 @@ router.get('/chats/:chatId/messages', async (req, res) => {
       mediaUrl: m.media_url || '',
     }));
     res.json({ ok: true, messages: mapped, chatId, total: mapped.length });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 router.get('/chats/:chatId/photo', async (req, res) => {
@@ -98,7 +105,9 @@ router.get('/chats/:chatId/photo', async (req, res) => {
     const chatId = decodeURIComponent(req.params.chatId);
     const url = await getProfilePhoto(chatId);
     res.json({ photo: url, source: url ? 'whatsapp' : 'unavailable' });
-  } catch { res.json({ photo: null, source: 'error' }); }
+  } catch {
+    res.json({ photo: null, source: 'error' });
+  }
 });
 
 router.get('/events', (req, res) => {
@@ -121,7 +130,20 @@ router.post('/chats/:chatId/send', async (req, res) => {
     else content = { text: message };
 
     const result = await sendMessage(chatId, content);
-    res.json({ ok: true, success: true, messageId: result.key.id || result.key });
+    const msgId = result.key.id || result.key;
+
+    // Persist sent message to Supabase
+    const chatName = getContactName(chatId) || chatId.split('@')[0];
+    saveMessage(chatId, chatName, {
+      messageId: msgId,
+      fromMe: true,
+      text: typeof message === 'string' ? message : message.caption || '',
+      type: type,
+      timestamp: Date.now()
+    }).catch(() => {});
+    upsertChat(chatId, chatName, typeof message === 'string' ? message : message.caption || '', Date.now()).catch(() => {});
+
+    res.json({ ok: true, success: true, messageId: msgId });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -131,26 +153,50 @@ router.post('/send', async (req, res) => {
   try {
     const { chatId, message, type = 'text' } = req.body;
     if (!chatId || !message) return res.status(400).json({ error: 'chatId y message son requeridos' });
+
     let content;
     if (type === 'text') content = message;
     else if (type === 'image') content = { image: { url: message.url }, caption: message.caption };
     else if (type === 'document') content = { document: { url: message.url }, fileName: message.fileName };
     else content = message;
+
     const result = await sendMessage(chatId, content);
+
+    // Persist sent message to Supabase
+    const chatName = getContactName(chatId) || chatId.split('@')[0];
+    saveMessage(chatId, chatName, {
+      messageId: result.key.id,
+      fromMe: true,
+      text: typeof message === 'string' ? message : message.caption || '',
+      type: type,
+      timestamp: Date.now()
+    }).catch(() => {});
+    upsertChat(chatId, chatName, typeof message === 'string' ? message : message.caption || '', Date.now()).catch(() => {});
+
     res.json({ success: true, messageId: result.key.id });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 router.post('/disconnect', async (req, res) => {
-  try { await disconnect(); res.json({ success: true, message: 'Desconectado' }); }
-  catch (err) { res.status(500).json({ error: err.message }); }
+  try {
+    await disconnect();
+    res.json({ success: true, message: 'Desconectado' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 router.get('/settings', (req, res) => {
   res.json({
-    server: 'sanate-wa-server', version: '2.0.0', engine: 'baileys-standalone',
-    connection: getConnectionState(), sse: req.app.get('sse')?.getStatus(),
-    supabase: !!req.app.get('supabase'), uptime: Math.floor(process.uptime()),
+    server: 'sanate-wa-server',
+    version: '2.0.0',
+    engine: 'baileys-standalone',
+    connection: getConnectionState(),
+    sse: req.app.get('sse')?.getStatus(),
+    supabase: !!req.app.get('supabase'),
+    uptime: Math.floor(process.uptime()),
     contacts: contactCache.keys().length
   });
 });
@@ -161,9 +207,14 @@ router.get('/contacts', async (req, res) => {
     if (!supabase) return res.json({ clients: [] });
     const { data, error } = await supabase.from('oasis_wa_chats').select('*').order('last_timestamp', { ascending: false });
     if (error) throw error;
-    const enriched = (data || []).map(c => ({ ...c, live_name: getContactName(c.jid) || c.name || c.phone }));
+    const enriched = (data || []).map(c => ({
+      ...c,
+      live_name: getContactName(c.jid) || c.name || c.phone
+    }));
     res.json({ clients: enriched, total: enriched.length });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 module.exports = router;
