@@ -325,7 +325,7 @@ function getMessages(dev, jid) {
     id:msg.id, dir:msg.fromMe?'s':'r', txt:msg.body||'',
     time: msg.ts?new Date(msg.ts).toLocaleTimeString('es-ES',{hour:'2-digit',minute:'2-digit'}):'',
     ts:msg.ts, mediaUrl:msg.mediaUrl||null, mimetype:msg.mimetype||null,
-  }));
+  })).filter(m => m.txt || m.mediaUrl);
 }
 app.get('/messages/:id', auth, (req,res) => {
   const dev = getDevice(req.query.deviceId||'default');
