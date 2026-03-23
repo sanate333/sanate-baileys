@@ -14,6 +14,7 @@ let initialSyncDone = false;
 
 const photoCache = new NodeCache({ stdTTL: 900, checkperiod: 120 });
 const contactCache = new NodeCache({ stdTTL: 3600, checkperiod: 300 });
+const lidMap = new Map(); // Maps @lid JIDs to @s.whatsapp.net JIDs
 
 function getSocket() { return sock; }
 function getQR() { return qrCode; }
@@ -90,7 +91,11 @@ async function connectToWhatsApp() {
       if (isJidBroadcast(msg.key.remoteJid)) continue;
       if (msg.key.remoteJid === 'status@broadcast') continue;
 
-      const chatId = msg.key.remoteJid;
+      let chatId = msg.key.remoteJid;
+      // Resolve @lid JIDs to phone number JIDs to avoid duplicates
+      if (chatId && chatId.endsWith('@lid') && lidMap.has(chatId)) {
+        chatId = lidMap.get(chatId);
+      };
       const fromMe = msg.key.fromMe || false;
       const isGroup = isJidGroup(chatId);
       const pushName = msg.pushName || null;
@@ -123,8 +128,14 @@ async function connectToWhatsApp() {
   });
 
   sock.ev.on('contacts.update', (updates) => {
-    for (const { id, notify } of updates) {
-      if (notify) contactCache.set(id, notify);
+    for (const { id, notify, lid } of updates) {
+        if (notify) contactCache.set(id, notify);
+        // Map LID to phone JID for deduplication
+        if (lid && id && id.endsWith('@s.whatsapp.net')) {
+          const lidJid = lid.endsWith('@lid') ? lid : lid + '@lid';
+          lidMap.set(lidJid, id);
+          if (notify) contactCache.set(lidJid, notify);
+        }
     }
   });
 
@@ -321,4 +332,4 @@ async function disconnect() {
   initialSyncDone = false;
 }
 
-module.exports = { initBaileys, getSocket, getQR, getConnectionState, getProfilePhoto, getContactName, sendMessage, disconnect, contactCache };
+module.exports = { initBaileys, getSocket, getQR, getConnectionState, getProfilePhoto, getContactName, sendMessage, disconnect, contactCache, lidMap };
