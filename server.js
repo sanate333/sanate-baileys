@@ -1,4 +1,4 @@
-const { default: makeWASocket, DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion, } = require('@whiskeysockets/baileys');
+ const { default: makeWASocket, DisconnectReason, useMultiFileAuthState, fetchLatestBaileysVersion, } = require('@whiskeysockets/baileys');
 const express = require('express');
 const cors = require('cors');
 const qrcode = require('qrcode');
