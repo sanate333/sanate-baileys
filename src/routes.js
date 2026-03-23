@@ -44,21 +44,28 @@ router.get('/chats', async (req, res) => {
   try {
     const limit = parseInt(req.query.limit) || 100;
     const chats = await getChats(limit);
-    const enriched = chats.map(chat => ({
-      ...chat,
-      // Campos que el frontend espera (normChat)
-      chatId: chat.jid,
-      id: chat.jid,
-      name: getContactName(chat.jid) || chat.name || chat.phone,
-      pushName: chat.push_name || getContactName(chat.jid) || chat.name,
-      phone: chat.phone,
-      lastMessageAt: chat.last_timestamp,
-      updatedAt: chat.updated_at || chat.last_timestamp,
-      lastMessagePreview: chat.last_message || '',
-      preview: chat.last_message || '',
-      unreadCount: chat.unread || 0,
-      photoUrl: chat.profile_photo_url || '',
-    }));
+    const enriched = chats.map(chat => {
+      // Extraer numero limpio del JID
+      const jidNum = (chat.jid || '').replace(/@s\.whatsapp\.net|@g\.us|@c\.us|@lid/g, '');
+      const phone = chat.phone || (/^\d{7,}$/.test(jidNum) ? '+' + jidNum : '');
+      const contactName = getContactName(chat.jid);
+      const displayName = contactName || chat.push_name || chat.name || '';
+      return {
+        ...chat,
+        chatId: chat.jid,
+        id: chat.jid,
+        name: displayName || phone || jidNum,
+        pushName: displayName,
+        phone,
+        platform: 'whatsapp',
+        lastMessageAt: chat.last_timestamp,
+        updatedAt: chat.updated_at || chat.last_timestamp,
+        lastMessagePreview: chat.last_message || '',
+        preview: chat.last_message || '',
+        unreadCount: chat.unread || 0,
+        photoUrl: chat.profile_photo_url || '',
+      };
+    });
     res.json({ chats: enriched, total: enriched.length, source: 'supabase' });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
