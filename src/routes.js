@@ -44,7 +44,21 @@ router.get('/chats', async (req, res) => {
   try {
     const limit = parseInt(req.query.limit) || 100;
     const chats = await getChats(limit);
-    const enriched = chats.map(chat => ({ ...chat, name: getContactName(chat.jid) || chat.name || chat.phone }));
+    const enriched = chats.map(chat => ({
+      ...chat,
+      // Campos que el frontend espera (normChat)
+      chatId: chat.jid,
+      id: chat.jid,
+      name: getContactName(chat.jid) || chat.name || chat.phone,
+      pushName: chat.push_name || getContactName(chat.jid) || chat.name,
+      phone: chat.phone,
+      lastMessageAt: chat.last_timestamp,
+      updatedAt: chat.updated_at || chat.last_timestamp,
+      lastMessagePreview: chat.last_message || '',
+      preview: chat.last_message || '',
+      unreadCount: chat.unread || 0,
+      photoUrl: chat.profile_photo_url || '',
+    }));
     res.json({ chats: enriched, total: enriched.length, source: 'supabase' });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -55,7 +69,20 @@ router.get('/chats/:chatId/messages', async (req, res) => {
     const limit = parseInt(req.query.limit) || 50;
     const before = req.query.before || null;
     const messages = await getMessages(chatId, limit, before);
-    res.json({ messages, chatId, total: messages.length });
+    // Transformar campos para el frontend (normMsg espera text, direction, type)
+    const mapped = messages.map(m => ({
+      ...m,
+      id: m.message_id || m.id,
+      providerMessageId: m.message_id,
+      text: m.content || '',
+      txt: m.content || '',
+      direction: m.direction === 's' ? 'outgoing' : 'incoming',
+      dir: m.direction,
+      type: m.media_type || 'text',
+      timestamp: m.timestamp,
+      mediaUrl: m.media_url || '',
+    }));
+    res.json({ ok: true, messages: mapped, chatId, total: mapped.length });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -87,7 +114,7 @@ router.post('/chats/:chatId/send', async (req, res) => {
     else content = { text: message };
 
     const result = await sendMessage(chatId, content);
-    res.json({ success: true, messageId: result.key });
+    res.json({ ok: true, success: true, messageId: result.key.id || result.key });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
