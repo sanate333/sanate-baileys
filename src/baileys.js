@@ -47,7 +47,7 @@ async function connectToWhatsApp() {
     auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger) },
     printQRInTerminal: true,
     generateHighQualityLinkPreview: true,
-    syncFullHistory: false,
+    syncFullHistory: true,
     markOnlineOnConnect: true,
     getMessage: async (key) => ({ conversation: '' })
   });
