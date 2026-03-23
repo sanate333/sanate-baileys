@@ -1,10 +1,9 @@
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, makeCacheableSignalKeyStore, isJidGroup, isJidBroadcast } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, DisconnectReason, fetchLatestBaileysVersion, makeCacheableSignalKeyStore, isJidGroup, isJidBroadcast } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const pino = require('pino');
 const NodeCache = require('node-cache');
-const path = require('path');
-const { existsSync, mkdirSync, rmSync } = require('fs');
 const { saveMessage, upsertChat, syncInitialChats } = require('./supabase');
+const { useSupabaseAuthState, clearAuth, saveAuthToSupabase } = require('./auth-store');
 
 let sock = null;
 let qrCode = null;
@@ -23,14 +22,11 @@ function getConnectionState() { return connectionState; }
 async function initBaileys(supabase, sse) {
   supabaseClient = supabase;
   sseManager = sse;
-  const authDir = path.join(__dirname, '..', 'auth_info');
-  if (!existsSync(authDir)) mkdirSync(authDir, { recursive: true });
   await connectToWhatsApp();
 }
 
 async function connectToWhatsApp() {
-  const authDir = path.join(__dirname, '..', 'auth_info');
-  const { state, saveCreds } = await useMultiFileAuthState(authDir);
+  const { state, saveCreds } = await useSupabaseAuthState(supabaseClient);
   const { version } = await fetchLatestBaileysVersion();
   const logger = pino({ level: 'silent' });
 
@@ -71,9 +67,7 @@ async function connectToWhatsApp() {
         setTimeout(connectToWhatsApp, 5000);
       } else {
         console.log('Logout. Borrando sesion...');
-        const authDir2 = path.join(__dirname, '..', 'auth_info');
-        rmSync(authDir2, { recursive: true, force: true });
-        mkdirSync(authDir2, { recursive: true });
+        await clearAuth(supabaseClient);
         qrCode = null;
         initialSyncDone = false;
       }
@@ -84,6 +78,8 @@ async function connectToWhatsApp() {
       qrCode = null;
       console.log('WhatsApp CONECTADO');
       if (sseManager) sseManager.broadcast({ type: 'connection', data: { status: 'connected' } });
+      // Guardar sesion completa en Supabase al conectar
+      saveAuthToSupabase(supabaseClient).catch(() => {});
       if (!initialSyncDone) setTimeout(runInitialSync, 3000);
     }
   });
@@ -136,7 +132,6 @@ async function connectToWhatsApp() {
     if (sseManager) sseManager.broadcast({ type: 'presence', data: update });
   });
 }
-
 async function runInitialSync() {
   if (initialSyncDone) return;
   if (!sock || connectionState !== 'connected') return;
