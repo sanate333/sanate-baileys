@@ -59,7 +59,7 @@ async function connectToWhatsApp() {
 
     if (qr) {
       qrCode = qr;
-      connectionState = 'qr_ready';
+      connectionState = 'qr';
       console.log('QR listo - escanea con tu telefono');
       sseManager?.broadcast({ type: 'qr', data: { qr } });
     }
