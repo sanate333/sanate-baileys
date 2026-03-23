@@ -344,8 +344,16 @@ app.post('/send', auth, async (req,res) => {
   const { to, message, deviceId } = req.body;
   const dev = getDevice(deviceId||'default');
   if (!dev.sock||dev.status!=='connected') return res.status(400).json({error:'No conectado'});
-  try { const jid=to.includes('@')?to:to.replace(/\D/g,'')+('@s.whatsapp.net'); await dev.sock.sendMessage(jid,{text:message}); res.json({ok:true}); }
-  catch(e) { res.status(500).json({error:e.message}); }
+  try {
+    const jid = to.includes('@s.whatsapp.net') ? to : to + '@s.whatsapp.net';
+    const result = await sock.sendMessage(jid, { text: message });
+    // Store sent message in waMessages so it shows in dashboard
+    const arr = dev.waMessages.get(jid) || [];
+    arr.push({ id: result.key.id, body: message, fromMe: true, ts: Date.now() });
+    if (arr.length > 500) arr.splice(0, arr.length - 500);
+    dev.waMessages.set(jid, arr);
+    res.json({ success: true, messageId: result.key.id });
+  } catch (e) { res.status(500).json({ error: e.message }) }
 });
 
 // Ã¢ÂÂÃ¢ÂÂ Send buttons Ã¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂ
