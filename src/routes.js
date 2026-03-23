@@ -73,6 +73,26 @@ router.get('/events', (req, res) => {
   sse.addClient(req, res);
 });
 
+// Route alias: frontend sends to /chats/:chatId/send
+router.post('/chats/:chatId/send', async (req, res) => {
+  try {
+    const chatId = decodeURIComponent(req.params.chatId);
+    const { message, type = 'text' } = req.body;
+    if (!chatId || !message) return res.status(400).json({ error: 'chatId y message son requeridos' });
+
+    let content;
+    if (type === 'text') content = { text: message };
+    else if (type === 'image') content = { image: { url: message.url }, caption: message.caption };
+    else if (type === 'document') content = { document: { url: message.url }, fileName: message.fileName };
+    else content = { text: message };
+
+    const result = await sendMessage(chatId, content);
+    res.json({ success: true, messageId: result.key });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 router.post('/send', async (req, res) => {
   try {
     const { chatId, message, type = 'text' } = req.body;
