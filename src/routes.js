@@ -4,6 +4,32 @@ const QRCode = require('qrcode');
 const { getConnectionState, getQR, getProfilePhoto, getContactName, sendMessage, disconnect, getSocket, contactCache } = require('./baileys');
 const { getChats, getMessages, saveMessage, upsertChat } = require('./supabase');
 
+// Middleware: parse multipart/form-data text fields (no external deps)
+function parseMultipart(req, res, next) {
+  const ct = req.headers['content-type'] || '';
+  if (!ct.includes('multipart/form-data')) return next();
+  const boundary = ct.split('boundary=')[1];
+  if (!boundary) return next();
+  const chunks = [];
+  req.on('data', c => chunks.push(c));
+  req.on('end', () => {
+    try {
+      const raw = Buffer.concat(chunks).toString();
+      const parts = raw.split('--' + boundary).filter(p => p.includes('name='));
+      const body = {};
+      for (const part of parts) {
+        const nameMatch = part.match(/name="([^"]+)"/);
+        if (!nameMatch) continue;
+        const val = part.split('\r\n\r\n')[1];
+        if (val) body[nameMatch[1]] = val.replace(/\r\n--$/, '').trim();
+      }
+      req.body = { ...req.body, ...body };
+    } catch (e) { /* ignore parse errors */ }
+    next();
+  });
+}
+router.use(parseMultipart);
+
 function auth(req, res, next) {
   const openPaths = ['/events', '/status', '/qr', '/settings'];
   if (openPaths.some(p => req.path === p || req.path.startsWith(p))) return next();
@@ -18,6 +44,7 @@ function auth(req, res, next) {
 }
 
 router.use(auth);
+
 router.get('/status', (req, res) => {
   res.json({
     status: getConnectionState(),
@@ -120,14 +147,15 @@ router.get('/events', (req, res) => {
 router.post('/chats/:chatId/send', async (req, res) => {
   try {
     const chatId = decodeURIComponent(req.params.chatId);
-    const { message, type = 'text' } = req.body;
-    if (!chatId || !message) return res.status(400).json({ error: 'chatId y message son requeridos' });
+    const { message, text, type = 'text' } = req.body;
+    const msg = message || text;
+    if (!chatId || !msg) return res.status(400).json({ error: 'chatId y message son requeridos' });
 
     let content;
-    if (type === 'text') content = { text: message };
-    else if (type === 'image') content = { image: { url: message.url }, caption: message.caption };
-    else if (type === 'document') content = { document: { url: message.url }, fileName: message.fileName };
-    else content = { text: message };
+    if (type === 'text') content = { text: msg };
+    else if (type === 'image') content = { image: { url: msg.url }, caption: msg.caption };
+    else if (type === 'document') content = { document: { url: msg.url }, fileName: msg.fileName };
+    else content = { text: msg };
 
     const result = await sendMessage(chatId, content);
     const msgId = result.key.id || result.key;
@@ -137,11 +165,11 @@ router.post('/chats/:chatId/send', async (req, res) => {
     saveMessage(chatId, chatName, {
       messageId: msgId,
       fromMe: true,
-      text: typeof message === 'string' ? message : message.caption || '',
+      text: typeof msg === 'string' ? msg : msg.caption || '',
       type: type,
       timestamp: Date.now()
     }).catch(() => {});
-    upsertChat(chatId, chatName, typeof message === 'string' ? message : message.caption || '', Date.now()).catch(() => {});
+    upsertChat(chatId, chatName, typeof msg === 'string' ? msg : msg.caption || '', Date.now()).catch(() => {});
 
     res.json({ ok: true, success: true, messageId: msgId });
   } catch (err) {
@@ -151,14 +179,15 @@ router.post('/chats/:chatId/send', async (req, res) => {
 
 router.post('/send', async (req, res) => {
   try {
-    const { chatId, message, type = 'text' } = req.body;
-    if (!chatId || !message) return res.status(400).json({ error: 'chatId y message son requeridos' });
+    const { chatId, message, text, type = 'text' } = req.body;
+    const msg = message || text;
+    if (!chatId || !msg) return res.status(400).json({ error: 'chatId y message son requeridos' });
 
     let content;
-    if (type === 'text') content = message;
-    else if (type === 'image') content = { image: { url: message.url }, caption: message.caption };
-    else if (type === 'document') content = { document: { url: message.url }, fileName: message.fileName };
-    else content = message;
+    if (type === 'text') content = msg;
+    else if (type === 'image') content = { image: { url: msg.url }, caption: msg.caption };
+    else if (type === 'document') content = { document: { url: msg.url }, fileName: msg.fileName };
+    else content = msg;
 
     const result = await sendMessage(chatId, content);
 
@@ -167,11 +196,11 @@ router.post('/send', async (req, res) => {
     saveMessage(chatId, chatName, {
       messageId: result.key.id,
       fromMe: true,
-      text: typeof message === 'string' ? message : message.caption || '',
+      text: typeof msg === 'string' ? msg : msg.caption || '',
       type: type,
       timestamp: Date.now()
     }).catch(() => {});
-    upsertChat(chatId, chatName, typeof message === 'string' ? message : message.caption || '', Date.now()).catch(() => {});
+    upsertChat(chatId, chatName, typeof msg === 'string' ? msg : msg.caption || '', Date.now()).catch(() => {});
 
     res.json({ success: true, messageId: result.key.id });
   } catch (err) {
