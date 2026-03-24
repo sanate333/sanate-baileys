@@ -246,4 +246,51 @@ router.get('/contacts', async (req, res) => {
   }
 });
 
+
+// ─── AI REPLY ENDPOINT (OpenAI direct, replaces N8N) ───
+router.post('/ai-reply', async (req, res) => {
+  try {
+    const { chatId, messageType, text, clientName, systemPrompt, openaiKey, history } = req.body;
+    if (!openaiKey) return res.status(400).json({ error: 'No API key provided' });
+    if (!text && messageType === 'text') return res.status(400).json({ error: 'No text provided' });
+
+    const messages = [];
+    if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
+    if (history && Array.isArray(history)) {
+      history.forEach(h => {
+        if (h.role && h.content) messages.push({ role: h.role, content: h.content });
+      });
+    }
+    messages.push({ role: 'user', content: text || '[mensaje multimedia]' });
+
+    const oaiRes = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + openaiKey,
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        messages,
+        max_tokens: 1024,
+        temperature: 0.7,
+      }),
+    });
+
+    if (!oaiRes.ok) {
+      const errBody = await oaiRes.text();
+      console.error('[ai-reply] OpenAI error:', oaiRes.status, errBody);
+      return res.status(502).json({ error: 'OpenAI API error', status: oaiRes.status, detail: errBody });
+    }
+
+    const oaiData = await oaiRes.json();
+    const reply = oaiData.choices?.[0]?.message?.content || '';
+    console.log('[ai-reply] Success for', chatId, '- reply length:', reply.length);
+    res.json({ reply, model: 'gpt-4o-mini', usage: oaiData.usage });
+  } catch (err) {
+    console.error('[ai-reply] Error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;
