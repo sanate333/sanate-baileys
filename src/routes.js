@@ -254,7 +254,8 @@ router.get('/ai-config', (req, res) => {
   // Don't expose full API keys
   res.json({
     enabled: cfg.enabled,
-    hasClaudeKey: !!cfg.claudeKey,
+    hasGeminiKey: !!cfg.geminiKey,
+      hasClaudeKey: !!cfg.claudeKey,
     hasOpenaiKey: !!cfg.openaiKey,
     botDelay: cfg.botDelay,
     msgMode: cfg.msgMode,
@@ -274,7 +275,8 @@ router.post('/ai-config', (req, res) => {
     res.json({
       ok: true,
       enabled: updated.enabled,
-      hasClaudeKey: !!updated.claudeKey,
+      hasGeminiKey: !!updated.geminiKey,
+        hasClaudeKey: !!updated.claudeKey,
       hasOpenaiKey: !!updated.openaiKey,
       botDelay: updated.botDelay,
       msgMode: updated.msgMode,
