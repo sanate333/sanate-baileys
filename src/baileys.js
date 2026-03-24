@@ -3,6 +3,7 @@ const { Boom } = require('@hapi/boom');
 const pino = require('pino');
 const NodeCache = require('node-cache');
 const { saveMessage, updateMessageStatus, upsertChat, syncInitialChats } = require('./supabase');
+const { handleIncomingMessage } = require('./auto-reply');
 const { useSupabaseAuthState, clearAuth, saveAuthToSupabase } = require('./auth-store');
 
 let sock = null;
@@ -124,6 +125,13 @@ async function connectToWhatsApp() {
         type: 'message',
         data: { chatId, messageId: msg.key.id, pushName, senderName, text: messageText, messageType, fromMe, isGroup, timestamp: Date.now() }
       });
+
+      // Server-side AI auto-reply (works without browser)
+      if (!fromMe && !isGroup && messageText) {
+        handleIncomingMessage(chatId, senderName, messageText, messageType, sendMessage).catch(err => {
+          console.error('[auto-reply] Unhandled error:', err.message);
+        });
+      }
     }
   });
 
