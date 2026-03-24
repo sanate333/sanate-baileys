@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const QRCode = require('qrcode');
 const { getConnectionState, getQR, getProfilePhoto, getContactName, sendMessage, disconnect, getSocket, contactCache } = require('./baileys');
+const { getConfig, setConfig } = require('./auto-reply');
 const { getChats, getMessages, saveMessage, upsertChat } = require('./supabase');
 
 // Middleware: parse multipart/form-data text fields (no external deps)
@@ -31,7 +32,7 @@ function parseMultipart(req, res, next) {
 router.use(parseMultipart);
 
 function auth(req, res, next) {
-  const openPaths = ['/events', '/status', '/qr', '/settings'];
+  const openPaths = ['/events', '/status', '/qr', '/settings', '/ai-config'];
   if (openPaths.some(p => req.path === p || req.path.startsWith(p))) return next();
   if (process.env.API_SECRET) {
     const token = req.headers.authorization?.replace('Bearer ', '') || req.query.token || req.headers['x-api-key'];
@@ -246,6 +247,42 @@ router.get('/contacts', async (req, res) => {
   }
 });
 
+
+// --- AI CONFIG ENDPOINT (server-side auto-reply settings) ---
+router.get('/ai-config', (req, res) => {
+  const cfg = getConfig();
+  // Don't expose full API keys
+  res.json({
+    enabled: cfg.enabled,
+    hasClaudeKey: !!cfg.claudeKey,
+    hasOpenaiKey: !!cfg.openaiKey,
+    botDelay: cfg.botDelay,
+    msgMode: cfg.msgMode,
+    useEmojis: cfg.useEmojis,
+    hasSystemPrompt: !!cfg.systemPrompt,
+  });
+});
+
+router.post('/ai-config', (req, res) => {
+  try {
+    const cfg = req.body;
+    if (!cfg || typeof cfg !== 'object') {
+      return res.status(400).json({ error: 'Invalid config' });
+    }
+    setConfig(cfg);
+    const updated = getConfig();
+    res.json({
+      ok: true,
+      enabled: updated.enabled,
+      hasClaudeKey: !!updated.claudeKey,
+      hasOpenaiKey: !!updated.openaiKey,
+      botDelay: updated.botDelay,
+      msgMode: updated.msgMode,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // --- AI REPLY ENDPOINT (supports OpenAI + Claude) ---
 router.post('/ai-reply', async (req, res) => {
