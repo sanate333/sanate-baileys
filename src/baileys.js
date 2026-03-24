@@ -2,7 +2,7 @@ const { default: makeWASocket, DisconnectReason, fetchLatestBaileysVersion, make
 const { Boom } = require('@hapi/boom');
 const pino = require('pino');
 const NodeCache = require('node-cache');
-const { saveMessage, upsertChat, syncInitialChats } = require('./supabase');
+const { saveMessage, updateMessageStatus, upsertChat, syncInitialChats } = require('./supabase');
 const { useSupabaseAuthState, clearAuth, saveAuthToSupabase } = require('./auth-store');
 
 let sock = null;
@@ -138,6 +138,26 @@ async function connectToWhatsApp() {
         }
     }
   });
+
+    sock.ev.on('messages.update', async (updates) => {
+      for (const { key, update } of updates) {
+        if (!update.status) continue;
+        const statusMap = { 2: 'delivered', 3: 'read', 4: 'played' };
+        const statusStr = statusMap[update.status];
+        if (!statusStr) continue;
+        let chatId = key.remoteJid;
+        if (chatId && chatId.endsWith('@lid') && lidMap.has(chatId)) {
+          chatId = lidMap.get(chatId);
+        }
+        const messageId = key.id;
+        console.log('[WA] Message status update:', messageId, statusStr);
+        await updateMessageStatus(messageId, statusStr);
+        if (sseManager) sseManager.broadcast({
+          type: 'message_status',
+          data: { chatId, messageId, status: statusStr }
+        });
+      }
+    });
 
   sock.ev.on('presence.update', (update) => {
     if (sseManager) sseManager.broadcast({ type: 'presence', data: update });
