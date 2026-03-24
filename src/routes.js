@@ -247,46 +247,94 @@ router.get('/contacts', async (req, res) => {
 });
 
 
-// ─── AI REPLY ENDPOINT (OpenAI direct, replaces N8N) ───
+// --- AI REPLY ENDPOINT (supports OpenAI + Claude) ---
 router.post('/ai-reply', async (req, res) => {
   try {
-    const { chatId, messageType, text, clientName, systemPrompt, openaiKey, history } = req.body;
-    if (!openaiKey) return res.status(400).json({ error: 'No API key provided' });
-    if (!text && messageType === 'text') return res.status(400).json({ error: 'No text provided' });
-
-    const messages = [];
-    if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
-    if (history && Array.isArray(history)) {
-      history.forEach(h => {
-        if (h.role && h.content) messages.push({ role: h.role, content: h.content });
-      });
+    const { chatId, messageType, text, clientName, systemPrompt, openaiKey, claudeKey, history } = req.body;
+    
+    const useClaude = claudeKey && claudeKey.startsWith('sk-ant-');
+    const useOpenai = openaiKey && openaiKey.startsWith('sk-');
+    
+    if (!useClaude && !useOpenai) {
+      return res.status(400).json({ error: 'No valid API key provided (need openaiKey or claudeKey)' });
     }
-    messages.push({ role: 'user', content: text || '[mensaje multimedia]' });
+    if (!text && messageType === 'text') {
+      return res.status(400).json({ error: 'No text provided' });
+    }
 
-    const oaiRes = await fetch('https://api.openai.com/v1/chat/completions', {
+    const userMsg = text || '[mensaje multimedia]';
+
+    // --- CLAUDE (Anthropic) ---
+    if (useClaude) {
+      console.log('[ai-reply] Using Claude for', chatId);
+      const claudeMsgs = [];
+      if (history && Array.isArray(history)) {
+        history.forEach(h => {
+          if (h.role && h.content && h.role !== 'system') {
+            claudeMsgs.push({ role: h.role, content: h.content });
+          }
+        });
+      }
+      claudeMsgs.push({ role: 'user', content: userMsg });
+      
+      // Ensure alternating roles
+      const clean = [];
+      let lastRole = null;
+      for (const m of claudeMsgs) {
+        if (m.role === lastRole && clean.length > 0) {
+          clean[clean.length - 1].content += '\n' + m.content;
+        } else {
+          clean.push({ ...m });
+          lastRole = m.role;
+        }
+      }
+
+      const body = { model: 'claude-sonnet-4-20250514', max_tokens: 1024, messages: clean };
+      if (systemPrompt) body.system = systemPrompt;
+
+      const cRes = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-api-key': claudeKey, 'anthropic-version': '2023-06-01' },
+        body: JSON.stringify(body),
+      });
+
+      if (!cRes.ok) {
+        const err = await cRes.text();
+        console.error('[ai-reply] Claude error:', cRes.status, err);
+        return res.status(502).json({ error: 'Claude API error', status: cRes.status, detail: err });
+      }
+
+      const cData = await cRes.json();
+      const reply = cData.content && cData.content[0] ? cData.content[0].text : '';
+      console.log('[ai-reply] Claude OK for', chatId, '- len:', reply.length);
+      return res.json({ reply, model: cData.model || 'claude-sonnet', usage: cData.usage });
+    }
+
+    // --- OPENAI ---
+    console.log('[ai-reply] Using OpenAI for', chatId);
+    const msgs = [];
+    if (systemPrompt) msgs.push({ role: 'system', content: systemPrompt });
+    if (history && Array.isArray(history)) {
+      history.forEach(h => { if (h.role && h.content) msgs.push({ role: h.role, content: h.content }); });
+    }
+    msgs.push({ role: 'user', content: userMsg });
+
+    const oRes = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer ' + openaiKey,
-      },
-      body: JSON.stringify({
-        model: 'gpt-4o-mini',
-        messages,
-        max_tokens: 1024,
-        temperature: 0.7,
-      }),
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + openaiKey },
+      body: JSON.stringify({ model: 'gpt-4o-mini', messages: msgs, max_tokens: 1024, temperature: 0.7 }),
     });
 
-    if (!oaiRes.ok) {
-      const errBody = await oaiRes.text();
-      console.error('[ai-reply] OpenAI error:', oaiRes.status, errBody);
-      return res.status(502).json({ error: 'OpenAI API error', status: oaiRes.status, detail: errBody });
+    if (!oRes.ok) {
+      const err = await oRes.text();
+      console.error('[ai-reply] OpenAI error:', oRes.status, err);
+      return res.status(502).json({ error: 'OpenAI API error', status: oRes.status, detail: err });
     }
 
-    const oaiData = await oaiRes.json();
-    const reply = oaiData.choices?.[0]?.message?.content || '';
-    console.log('[ai-reply] Success for', chatId, '- reply length:', reply.length);
-    res.json({ reply, model: 'gpt-4o-mini', usage: oaiData.usage });
+    const oData = await oRes.json();
+    const reply = oData.choices && oData.choices[0] ? oData.choices[0].message.content : '';
+    console.log('[ai-reply] OpenAI OK for', chatId, '- len:', reply.length);
+    res.json({ reply, model: 'gpt-4o-mini', usage: oData.usage });
   } catch (err) {
     console.error('[ai-reply] Error:', err.message);
     res.status(500).json({ error: err.message });
