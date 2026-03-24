@@ -1,23 +1,22 @@
 /**
  * Server-side AI Auto-Reply Module
- * Handles AI responses directly on the server without needing the browser open
+ * Supports: Gemini (FREE), Claude, OpenAI
+ * Priority: Gemini > Claude > OpenAI (Gemini is free!)
  */
 
-// In-memory config (set via /ai-config endpoint)
 let aiConfig = {
   enabled: false,
+  geminiKey: '',     // FREE - Google AI Studio key (AIza...)
   claudeKey: '',
   openaiKey: '',
   systemPrompt: '',
-  botDelay: 3,       // seconds before replying
-  msgMode: 'partes', // 'partes' or 'completo'
+  botDelay: 3,
+  msgMode: 'partes',
   useEmojis: true,
-  contactMap: {},     // per-contact enable/disable
+  contactMap: {},
 };
 
-// Track ongoing replies to prevent duplicates
 const replyingTo = new Set();
-// Store recent messages for context
 const chatHistory = new Map();
 const MAX_HISTORY = 10;
 
@@ -25,6 +24,7 @@ function getConfig() { return { ...aiConfig }; }
 
 function setConfig(cfg) {
   if (cfg.enabled !== undefined) aiConfig.enabled = cfg.enabled;
+  if (cfg.geminiKey) aiConfig.geminiKey = cfg.geminiKey;
   if (cfg.claudeKey) aiConfig.claudeKey = cfg.claudeKey;
   if (cfg.openaiKey) aiConfig.openaiKey = cfg.openaiKey;
   if (cfg.systemPrompt) aiConfig.systemPrompt = cfg.systemPrompt;
@@ -32,8 +32,8 @@ function setConfig(cfg) {
   if (cfg.msgMode) aiConfig.msgMode = cfg.msgMode;
   if (cfg.useEmojis !== undefined) aiConfig.useEmojis = cfg.useEmojis;
   if (cfg.contactMap) aiConfig.contactMap = cfg.contactMap;
-  console.log('[auto-reply] Config updated: enabled=' + aiConfig.enabled + ', key=' + (aiConfig.claudeKey ? 'claude' : aiConfig.openaiKey ? 'openai' : 'none'));
-  // Log contactMap for debugging
+  const provider = aiConfig.geminiKey ? 'gemini(FREE)' : aiConfig.claudeKey ? 'claude' : aiConfig.openaiKey ? 'openai' : 'none';
+  console.log('[auto-reply] Config updated: enabled=' + aiConfig.enabled + ', provider=' + provider);
   const mapKeys = Object.keys(aiConfig.contactMap || {});
   console.log('[auto-reply] contactMap has ' + mapKeys.length + ' entries, policy=' + (aiConfig.contactMap._defaultPolicy || 'deny'));
 }
@@ -45,6 +45,46 @@ function addToHistory(chatId, role, content) {
   if (h.length > MAX_HISTORY) h.splice(0, h.length - MAX_HISTORY);
 }
 
+// ── GEMINI (FREE) ──────────────────────────────────────────
+async function callGemini(systemPrompt, messages, apiKey) {
+  // Build Gemini format: contents array with role user/model
+  const contents = [];
+  for (const m of messages) {
+    contents.push({
+      role: m.role === 'assistant' ? 'model' : 'user',
+      parts: [{ text: m.content }]
+    });
+  }
+  // Ensure first message is from user
+  if (contents.length > 0 && contents[0].role === 'model') {
+    contents.unshift({ role: 'user', parts: [{ text: '(inicio de conversacion)' }] });
+  }
+  const body = {
+    contents: contents,
+    systemInstruction: systemPrompt ? { parts: [{ text: systemPrompt }] } : undefined,
+    generationConfig: {
+      maxOutputTokens: 1024,
+      temperature: 0.7
+    }
+  };
+  const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=' + apiKey;
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  if (!resp.ok) {
+    const err = await resp.text();
+    throw new Error('Gemini API ' + resp.status + ': ' + err.substring(0, 200));
+  }
+  const data = await resp.json();
+  if (data.candidates && data.candidates[0] && data.candidates[0].content) {
+    return data.candidates[0].content.parts.map(p => p.text || '').join('');
+  }
+  return '';
+}
+
+// ── CLAUDE ──────────────────────────────────────────
 async function callClaude(systemPrompt, messages, apiKey) {
   const clean = [];
   let lastRole = null;
@@ -68,6 +108,7 @@ async function callClaude(systemPrompt, messages, apiKey) {
   return data.content && data.content[0] ? data.content[0].text : '';
 }
 
+// ── OPENAI ──────────────────────────────────────────
 async function callOpenAI(systemPrompt, messages, apiKey) {
   const msgs = [];
   if (systemPrompt) msgs.push({ role: 'system', content: systemPrompt });
@@ -82,25 +123,22 @@ async function callOpenAI(systemPrompt, messages, apiKey) {
   return data.choices && data.choices[0] ? data.choices[0].message.content : '';
 }
 
+// ── MAIN HANDLER ──────────────────────────────────────────
 async function handleIncomingMessage(chatId, senderName, messageText, messageType, sendFn) {
-  // Must be enabled globally
   if (!aiConfig.enabled) return;
-  // Skip group chats
   if (chatId.includes('@g.us')) return;
-  // Must have at least one API key
+
+  // Check which provider is available (priority: Gemini FREE > Claude > OpenAI)
+  const useGemini = aiConfig.geminiKey && aiConfig.geminiKey.startsWith('AIza');
   const useClaude = aiConfig.claudeKey && aiConfig.claudeKey.startsWith('sk-ant-');
   const useOpenai = aiConfig.openaiKey && aiConfig.openaiKey.startsWith('sk-');
-  if (!useClaude && !useOpenai) return;
+  if (!useGemini && !useClaude && !useOpenai) return;
 
-  // *** DENY-BY-DEFAULT CONTACT POLICY ***
-  // If contactMap has _defaultPolicy = 'deny' (or any contactMap entries exist),
-  // only respond to contacts explicitly set to true
+  // DENY-BY-DEFAULT contact policy
   const map = aiConfig.contactMap || {};
   const hasMap = Object.keys(map).length > 0;
   if (hasMap) {
-    // Check if this specific contact is enabled
     if (map[chatId] !== true) {
-      // Also check without @s.whatsapp.net suffix
       const phoneOnly = chatId.replace('@s.whatsapp.net', '');
       if (map[phoneOnly] !== true && map[phoneOnly + '@s.whatsapp.net'] !== true) {
         console.log('[auto-reply] Contact ' + chatId + ' not in allowed list - skip');
@@ -109,13 +147,13 @@ async function handleIncomingMessage(chatId, senderName, messageText, messageTyp
     }
   }
 
-  // Prevent duplicate replies
   if (replyingTo.has(chatId)) { console.log('[auto-reply] Already replying to', chatId, '- skip'); return; }
 
   const userMsg = messageText || (messageType !== 'text' ? '[mensaje multimedia: ' + messageType + ']' : '');
   if (!userMsg) return;
 
-  console.log('[auto-reply] Processing message from', senderName, '(' + chatId + '):', userMsg.substring(0, 50));
+  const provider = useGemini ? 'Gemini(FREE)' : useClaude ? 'Claude' : 'OpenAI';
+  console.log('[auto-reply] Processing from', senderName, '(' + chatId + ') via', provider, ':', userMsg.substring(0, 50));
   replyingTo.add(chatId);
 
   try {
@@ -138,7 +176,10 @@ async function handleIncomingMessage(chatId, senderName, messageText, messageTyp
     }
 
     let reply;
-    if (useClaude) {
+    if (useGemini) {
+      console.log('[auto-reply] Calling Gemini (FREE) for', chatId);
+      reply = await callGemini(prompt, messages, aiConfig.geminiKey);
+    } else if (useClaude) {
       console.log('[auto-reply] Calling Claude for', chatId);
       reply = await callClaude(prompt, messages, aiConfig.claudeKey);
     } else {
@@ -147,7 +188,7 @@ async function handleIncomingMessage(chatId, senderName, messageText, messageTyp
     }
 
     if (!reply) { console.log('[auto-reply] Empty reply for', chatId); return; }
-    console.log('[auto-reply] Got reply for', chatId, '- len:', reply.length);
+    console.log('[auto-reply] Got reply via', provider, 'for', chatId, '- len:', reply.length);
     addToHistory(chatId, 'assistant', reply);
 
     const parts = reply.split('||||').map(p => p.trim()).filter(Boolean);
@@ -163,7 +204,7 @@ async function handleIncomingMessage(chatId, senderName, messageText, messageTyp
         await new Promise(r => setTimeout(r, partDelay));
       }
     }
-    console.log('[auto-reply] Done for', chatId);
+    console.log('[auto-reply] Done for', chatId, 'via', provider);
   } catch (err) { console.error('[auto-reply] Error for', chatId + ':', err.message); }
   finally { replyingTo.delete(chatId); }
 }
