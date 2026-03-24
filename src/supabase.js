@@ -27,6 +27,7 @@ async function saveMessage(chatJid, chatName, msgData) {
       content: msgData.text || null,
       media_type: msgData.type !== 'text' ? msgData.type : null,
       media_url: msgData.mediaUrl || null,
+      status: msgData.fromMe ? 'sent' : null,
       timestamp: msgData.timestamp
         ? new Date(typeof msgData.timestamp === 'number' && msgData.timestamp < 1e12 ? msgData.timestamp * 1000 : msgData.timestamp).toISOString()
         : new Date().toISOString(),
@@ -92,4 +93,19 @@ async function syncInitialChats(chatsData) {
   return { synced, errors };
 }
 
-module.exports = { initSupabase, getSupabase, saveMessage, upsertChat, getChats, getMessages, syncInitialChats };
+async function updateMessageStatus(messageId, status) {
+  if (!supabase) return null;
+  try {
+    const { data, error } = await supabase.from('oasis_wa_messages')
+      .update({ status })
+      .eq('message_id', messageId)
+      .select();
+    if (error) console.error('[Supabase] updateMessageStatus error:', error.message);
+    return data;
+  } catch (e) {
+    console.error('[Supabase] updateMessageStatus exception:', e.message);
+    return null;
+  }
+}
+
+module.exports = { initSupabase, getSupabase, saveMessage, updateMessageStatus, upsertChat, getChats, getMessages, syncInitialChats };
