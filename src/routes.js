@@ -3,7 +3,7 @@ const router = express.Router();
 const QRCode = require('qrcode');
 const { getConnectionState, getQR, getProfilePhoto, getContactName, sendMessage, disconnect, getSocket, contactCache } = require('./baileys');
 const { getChats, getMessages, saveMessage, upsertChat } = require('./supabase');
-const { getConfig, setConfig, getUsageStats, callGemini, callClaude, callOpenAI } = require('./auto-reply');
+const { getConfig, setConfig, getUsageStats } = require('./auto-reply');
 
 // Middleware: parse multipart/form-data text fields (no external deps)
 function parseMultipart(req, res, next) {
@@ -70,7 +70,8 @@ router.get('/qr', async (req, res) => {
 router.get('/chats', async (req, res) => {
   try {
     const limit = parseInt(req.query.limit) || 100;
-    const chats = await getChats(limit);  const enriched = chats.map(chat => {
+    const chats = await getChats(limit);
+    const enriched = chats.map(chat => {
       // Extraer numero limpio del JID
       const jidNum = (chat.jid || '').replace(/@s\.whatsapp\.net|@g\.us|@c\.us|@lid/g, '');
       const phone = chat.phone || (/^\d{7,}$/.test(jidNum) ? '+' + jidNum : '');
@@ -102,6 +103,7 @@ router.get('/chats/:chatId/messages', async (req, res) => {
     const limit = parseInt(req.query.limit) || 50;
     const before = req.query.before || null;
     const messages = await getMessages(chatId, limit, before);
+    // Transformar campos para el frontend (normMsg espera text, direction, type)
     const mapped = messages.map(m => ({
       ...m,
       id: m.message_id || m.id,
@@ -132,16 +134,19 @@ router.get('/events', (req, res) => {
   sse.addClient(req, res);
 });
 
+// Route alias: frontend sends to /chats/:chatId/send
 router.post('/chats/:chatId/send', async (req, res) => {
   try {
     const chatId = decodeURIComponent(req.params.chatId);
-    const { message: _msg, text: _txt, type = 'text' } = req.body; const message = _msg || _txt;
+    const { message, type = 'text' } = req.body;
     if (!chatId || !message) return res.status(400).json({ error: 'chatId y message son requeridos' });
+
     let content;
     if (type === 'text') content = { text: message };
     else if (type === 'image') content = { image: { url: message.url }, caption: message.caption };
     else if (type === 'document') content = { document: { url: message.url }, fileName: message.fileName };
     else content = { text: message };
+
     const result = await sendMessage(chatId, content);
     const msgId = result.key.id || result.key;
     const chatName = getContactName(chatId) || chatId.split('@')[0];
@@ -200,6 +205,7 @@ router.get('/contacts', async (req, res) => {
 router.post('/settings', (req, res) => {
   try {
     const b = req.body || {};
+    // Map frontend field names to aiConfig field names
     const cfg = {};
     if (b.botEnabled !== undefined) cfg.enabled = b.botEnabled;
     if (b.openaiKey) cfg.openaiKey = b.openaiKey;
@@ -211,6 +217,7 @@ router.post('/settings', (req, res) => {
     if (b.botDelay !== undefined) cfg.botDelay = b.botDelay;
     if (b.geminiKey) cfg.geminiKey = b.geminiKey;
     if (b.claudeKey) cfg.claudeKey = b.claudeKey;
+    // Also accept direct aiConfig fields
     if (b.enabled !== undefined) cfg.enabled = b.enabled;
     if (b.contactMap) cfg.contactMap = b.contactMap;
     setConfig(cfg);
@@ -220,6 +227,8 @@ router.post('/settings', (req, res) => {
   }
 });
 
+// --- AI CONFIG ENDPOINTS (server-side auto-reply settings) ---
+// GET returns FULL config so ANY browser/PC can load it (config lives on server)
 router.get('/ai-config', (req, res) => {
   const cfg = getConfig();
   res.json({
@@ -259,52 +268,10 @@ router.post('/ai-config', (req, res) => {
   }
 });
 
+// --- AI USAGE ---
 router.get('/ai-usage', (req, res) => {
   try { res.json(getUsageStats()); }
   catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-
-// ── AI Reply endpoint (dashboard manual IA) ──────────────────
-router.post('/ai-reply', async (req, res) => {
-  try {
-    const { text, systemPrompt, history, chatId, clientName } = req.body;
-    const config = getConfig();
-    
-    // Build messages array from history
-    const messages = [];
-    if (history && Array.isArray(history)) {
-      history.forEach(h => {
-        messages.push({ role: h.role === 'assistant' ? 'model' : 'user', text: h.content || h.text || '' });
-      });
-    }
-    // Add the current message
-    messages.push({ role: 'user', text: text || '' });
-    
-    const prompt = systemPrompt || config.systemPrompt || '';
-    let reply = null;
-    
-    // Try Gemini first, then Claude, then OpenAI
-    if (config.geminiKey) {
-      reply = await callGemini(prompt, messages, config.geminiKey);
-    } else if (config.claudeKey) {
-      reply = await callClaude(prompt, messages, config.claudeKey);
-    } else if (config.openaiKey) {
-      reply = await callOpenAI(prompt, messages, config.openaiKey);
-    } else {
-      return res.status(400).json({ error: 'no_key', message: 'No AI key configured' });
-    }
-    
-    if (!reply) {
-      return res.status(500).json({ error: 'no_reply', message: 'AI returned empty response' });
-    }
-    
-    console.log('[ai-reply] Generated reply for', chatId, ':', reply.substring(0, 80) + '...');
-    res.json({ reply });
-  } catch (e) {
-    console.error('[ai-reply] Error:', e.message);
-    res.status(500).json({ error: e.message });
-  }
 });
 
 module.exports = router;
