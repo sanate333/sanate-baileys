@@ -11,8 +11,8 @@ const { createServer } = require('http');
 const { initBaileys, getSocket, getQR, getConnectionState } = require('./baileys');
 const { initSupabase } = require('./supabase');
 const { SSEManager } = require('./sse');
+const { initAutoReply } = require('./auto-reply');
 const apiRoutes = require('./routes');
-const { initConfigStore, loadConfigFromSupabase } = require('./auto-reply');
 
 const app = express();
 const server = createServer(app);
@@ -52,30 +52,13 @@ async function start() {
   const supabase = initSupabase();
   app.set('supabase', supabase);
 
-  // Initialize AI config persistence
-  initConfigStore(supabase);
-  console.log('Cargando configuracion AI desde Supabase...');
-  const configLoaded = await loadConfigFromSupabase();
-  console.log(configLoaded ? 'Config AI cargada de Supabase' : 'No habia config guardada, usando defaults');
-
   server.listen(PORT, () => {
     console.log('Servidor corriendo en puerto ' + PORT);
     console.log('SSE disponible en /api/whatsapp/events');
   });
 
-  // Self-ping to keep Render awake (every 10 min)
-  const PING_URL = 'https://sanate-wa-bot.onrender.com/';
-  setInterval(() => {
-    const http = require('http');
-    const https = require('https');
-    const mod = PING_URL.startsWith('https') ? https : http;
-    mod.get(PING_URL, (res) => {
-      console.log('[Ping] Keep-alive: status', res.statusCode);
-    }).on('error', (e) => {
-      console.log('[Ping] Error:', e.message);
-    });
-  }, 10 * 60 * 1000); // 10 minutes
-  console.log('[Ping] Self-ping activado cada 10 minutos');
+  console.log('Iniciando auto-reply...');
+  await initAutoReply(supabase, null); // socket will be set on connection
 
   console.log('Iniciando conexion WhatsApp...');
   await initBaileys(supabase, sse);
