@@ -1,579 +1,413 @@
 /**
- * Server-side AI Auto-Reply Module v4
- * Fixes: message loop, rate limiting, confirmation loop, emoji flood
+ * SANATE Auto-Reply Module
+ * AI-powered auto-reply using Gemini (primary), Claude (fallback), OpenAI (fallback)
+ * Config persisted in Supabase oasis_wa_config table
  */
 
+let supabaseClient = null;
+let sock = null;
 
-let _supabaseClient = null;
-
+// --- In-memory config (loaded from Supabase on init) ---
 let aiConfig = {
   enabled: false,
   geminiKey: '',
   claudeKey: '',
   openaiKey: '',
   systemPrompt: '',
-  botDelay: 3,
-  msgMode: 'partes',
+  contactMap: {},     // { "jid": true/false } â true = bot active for that contact
+  botDelay: 3,        // seconds before replying
+  msgMode: 'all',     // 'all' | 'contacts' (only those in contactMap)
   useEmojis: true,
-  contactMap: {},
 };
 
-const replyingTo = new Set();
+// --- Conversation history (in-memory, persists until restart) ---
+// Map<chatJid, Array<{ role: 'user'|'model', text: string, ts: number }>>
 const chatHistory = new Map();
-const pausedChats = new Map();
-const confirmedChats = new Set(); // Track chats that already got a confirmation
-const MAX_HISTORY = 30;
+const MAX_HISTORY = 20; // keep last 20 messages per chat
 
-// v4: Anti-loop protection
-const recentBotReplies = new Map();
-const chatReplyCount = new Map();
-const MAX_REPLIES_PER_MINUTE = 3;
-const BOT_COOLDOWN_MS = 5000;
+// --- Dedup & throttle ---
+const replyTimers = new Map();       // debounce timers per chat
+const lastReplyTime = new Map();     // last reply timestamp per chat
+const processedReplies = new Set();  // message IDs we already replied to
+const DEBOUNCE_MS = 3000;
+const MIN_REPLY_INTERVAL = 5000;     // min 5s between replies to same chat
+const MAX_PROCESSED = 2000;
 
-const usageData = { daily: {} };
+// --- Usage stats ---
+let usageStats = { totalReplies: 0, geminiCalls: 0, claudeCalls: 0, openaiCalls: 0, errors: 0, lastReply: null };
 
-function getTodayKey() {
-  return new Date().toISOString().split('T')[0];
+// ===================== INIT =====================
+
+async function initAutoReply(supabase, socket) {
+  supabaseClient = supabase;
+  sock = socket;
+  await loadConfigFromSupabase();
+  console.log('Auto-reply inicializado. Enabled:', aiConfig.enabled, '| Prompt length:', (aiConfig.systemPrompt || '').length);
 }
 
-function recordUsage() {
-  const key = getTodayKey();
-  usageData.daily[key] = (usageData.daily[key] || 0) + 1;
-  const keys = Object.keys(usageData.daily).sort();
-  if (keys.length > 30) {
-    for (let i = 0; i < keys.length - 30; i++) delete usageData.daily[keys[i]];
-  }
+function updateSocket(socket) {
+  sock = socket;
 }
 
-function getUsageStats() {
-  const todayKey = getTodayKey();
-  const today = usageData.daily[todayKey] || 0;
-  const lastSevenDays = [];
-  for (let i = 6; i >= 0; i--) {
-    const d = new Date();
-    d.setDate(d.getDate() - i);
-    lastSevenDays.push(usageData.daily[d.toISOString().split('T')[0]] || 0);
-  }
-  const dayLabels = [];
-  for (let i = 6; i >= 0; i--) {
-    const d = new Date();
-    d.setDate(d.getDate() - i);
-    dayLabels.push(['Dom','Lun','Mar','Mie','Jue','Vie','Sab'][d.getDay()]);
-  }
-  const useGemini = aiConfig.geminiKey && aiConfig.geminiKey.startsWith('AIza');
-  const limit = useGemini ? 250 : 999999;
-  return {
-    today, limit, lastSevenDays, dayLabels,
-    provider: useGemini ? 'gemini' : aiConfig.claudeKey ? 'claude' : aiConfig.openaiKey ? 'openai' : 'none',
-    totalThisWeek: lastSevenDays.reduce((a, b) => a + b, 0),
-  };
-}
-
-function getConfig() { return { ...aiConfig }; }
-
-function setConfig(cfg) {
-  if (cfg.enabled !== undefined) aiConfig.enabled = cfg.enabled;
-  if (cfg.geminiKey) aiConfig.geminiKey = cfg.geminiKey;
-  if (cfg.claudeKey) aiConfig.claudeKey = cfg.claudeKey;
-  if (cfg.openaiKey) aiConfig.openaiKey = cfg.openaiKey;
-  if (cfg.systemPrompt) aiConfig.systemPrompt = cfg.systemPrompt;
-  if (cfg.botDelay !== undefined) aiConfig.botDelay = Math.max(0, Math.min(15, Number(cfg.botDelay) || 3));
-  if (cfg.msgMode) aiConfig.msgMode = cfg.msgMode;
-  if (cfg.useEmojis !== undefined) aiConfig.useEmojis = cfg.useEmojis;
-  if (cfg.contactMap) aiConfig.contactMap = cfg.contactMap;
-  const provider = aiConfig.geminiKey ? 'gemini(FREE)' : aiConfig.claudeKey ? 'claude' : aiConfig.openaiKey ? 'openai' : 'none';
-  console.log('[auto-reply] Config updated: enabled=' + aiConfig.enabled + ', provider=' + provider);
-
-  // Persist to Supabase
-  saveConfigToSupabase();
-}
-
-// === SUPABASE CONFIG PERSISTENCE ===
-function initConfigStore(supabase) {
-  _supabaseClient = supabase;
-  console.log('[AI Config] Supabase store initialized');
-}
+// ===================== CONFIG (Supabase persistence) =====================
 
 async function loadConfigFromSupabase() {
-  if (!_supabaseClient) { console.log('[AI Config] No Supabase client'); return false; }
+  if (!supabaseClient) return;
   try {
-    const { data, error } = await _supabaseClient
+    const { data, error } = await supabaseClient
       .from('oasis_wa_config')
       .select('*')
       .eq('id', 'default')
       .single();
-    if (error || !data) {
-      console.log('[AI Config] No saved config in Supabase:', error?.message || 'no data');
-      return false;
+    if (error) throw error;
+    if (data) {
+      aiConfig.enabled = data.enabled ?? false;
+      aiConfig.geminiKey = data.gemini_key || '';
+      aiConfig.claudeKey = data.claude_key || '';
+      aiConfig.openaiKey = data.openai_key || '';
+      aiConfig.systemPrompt = data.system_prompt || '';
+      aiConfig.contactMap = data.contact_map || {};
+      aiConfig.botDelay = data.bot_delay ?? 3;
+      aiConfig.msgMode = data.msg_mode || 'all';
+      aiConfig.useEmojis = data.use_emojis ?? true;
     }
-    // Map DB columns to aiConfig fields
-    if (data.enabled !== undefined && data.enabled !== null) aiConfig.enabled = data.enabled;
-    if (data.gemini_key) aiConfig.geminiKey = data.gemini_key;
-    if (data.claude_key) aiConfig.claudeKey = data.claude_key;
-    if (data.openai_key) aiConfig.openaiKey = data.openai_key;
-    if (data.system_prompt) aiConfig.systemPrompt = data.system_prompt;
-    if (data.bot_delay !== undefined && data.bot_delay !== null) aiConfig.botDelay = data.bot_delay;
-    if (data.msg_mode) aiConfig.msgMode = data.msg_mode;
-    if (data.use_emojis !== undefined && data.use_emojis !== null) aiConfig.useEmojis = data.use_emojis;
-    if (data.contact_map) aiConfig.contactMap = data.contact_map;
-    console.log('[AI Config] Loaded from Supabase - enabled:', aiConfig.enabled, 'provider:', aiConfig.geminiKey ? 'Gemini' : aiConfig.claudeKey ? 'Claude' : aiConfig.openaiKey ? 'OpenAI' : 'none');
-    return true;
-  } catch (e) {
-    console.error('[AI Config] Error loading from Supabase:', e.message);
-    return false;
+    console.log('Config cargada desde Supabase. Contacts:', Object.keys(aiConfig.contactMap).length);
+  } catch (err) {
+    console.error('Error cargando config:', err.message);
   }
 }
 
 async function saveConfigToSupabase() {
-  if (!_supabaseClient) return;
+  if (!supabaseClient) return;
   try {
-    const row = {
-      id: 'default',
-      enabled: aiConfig.enabled,
-      gemini_key: aiConfig.geminiKey || '',
-      claude_key: aiConfig.claudeKey || '',
-      openai_key: aiConfig.openaiKey || '',
-      system_prompt: aiConfig.systemPrompt || '',
-      bot_delay: aiConfig.botDelay,
-      msg_mode: aiConfig.msgMode || 'all',
-      use_emojis: aiConfig.useEmojis,
-      contact_map: aiConfig.contactMap || {},
-      updated_at: new Date().toISOString()
-    };
-    const { error } = await _supabaseClient
+    const { error } = await supabaseClient
       .from('oasis_wa_config')
-      .upsert(row, { onConflict: 'id' });
-    if (error) console.error('[AI Config] Save to Supabase failed:', error.message);
-    else console.log('[AI Config] Saved to Supabase');
-  } catch (e) {
-    console.error('[AI Config] Error saving to Supabase:', e.message);
+      .upsert({
+        id: 'default',
+        enabled: aiConfig.enabled,
+        gemini_key: aiConfig.geminiKey,
+        claude_key: aiConfig.claudeKey,
+        openai_key: aiConfig.openaiKey,
+        system_prompt: aiConfig.systemPrompt,
+        contact_map: aiConfig.contactMap,
+        bot_delay: aiConfig.botDelay,
+        msg_mode: aiConfig.msgMode,
+        use_emojis: aiConfig.useEmojis,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: 'id' });
+    if (error) throw error;
+    console.log('Config guardada en Supabase');
+  } catch (err) {
+    console.error('Error guardando config:', err.message);
   }
 }
 
-
-
-function pauseChat(chatId, reason) {
-  pausedChats.set(chatId, { reason: reason || 'order_confirmed', timestamp: Date.now() });
-  confirmedChats.add(chatId);
-  console.log('[auto-reply] PAUSED chat', chatId, 'reason:', reason);
-}
-function unpauseChat(chatId) {
-  pausedChats.delete(chatId);
-  confirmedChats.delete(chatId);
-  console.log('[auto-reply] UNPAUSED chat', chatId);
-}
-function isChatPaused(chatId) { return pausedChats.has(chatId); }
-function getPausedChats() {
-  const r = {};
-  pausedChats.forEach((v, k) => { r[k] = v; });
-  return r;
+function getConfig() {
+  return { ...aiConfig };
 }
 
-function addToHistory(chatId, role, content) {
-  if (!chatHistory.has(chatId)) chatHistory.set(chatId, []);
-  const h = chatHistory.get(chatId);
-  h.push({ role, content, ts: Date.now() });
-  if (h.length > MAX_HISTORY) h.splice(0, h.length - MAX_HISTORY);
-}
-function clearHistory(chatId) {
-  chatHistory.delete(chatId);
-  confirmedChats.delete(chatId);
-}
-
-// Check if order was already confirmed in chat history
-function wasAlreadyConfirmed(chatId) {
-  if (confirmedChats.has(chatId)) return true;
-  const history = chatHistory.get(chatId) || [];
-  for (var i = 0; i < history.length; i++) {
-    if (history[i].role === 'assistant' && detectOrderConfirmed(history[i].content)) {
-      confirmedChats.add(chatId);
-      return true;
-    }
-  }
-  return false;
+function setConfig(updates) {
+  if (updates.enabled !== undefined) aiConfig.enabled = updates.enabled;
+  if (updates.geminiKey !== undefined) aiConfig.geminiKey = updates.geminiKey;
+  if (updates.claudeKey !== undefined) aiConfig.claudeKey = updates.claudeKey;
+  if (updates.openaiKey !== undefined) aiConfig.openaiKey = updates.openaiKey;
+  if (updates.systemPrompt !== undefined) aiConfig.systemPrompt = updates.systemPrompt;
+  if (updates.contactMap !== undefined) aiConfig.contactMap = updates.contactMap;
+  if (updates.botDelay !== undefined) aiConfig.botDelay = updates.botDelay;
+  if (updates.msgMode !== undefined) aiConfig.msgMode = updates.msgMode;
+  if (updates.useEmojis !== undefined) aiConfig.useEmojis = updates.useEmojis;
+  // Persist to Supabase asynchronously
+  saveConfigToSupabase().catch(() => {});
 }
 
-function detectOrderConfirmed(text) {
-  if (!text) return false;
-  var lower = text.toLowerCase();
-  var phrases = [
-    'pedido confirmado', 'pedido esta confirmado', '100% confirmado',
-    'orden confirmada', 'venta cerrada', 'datos registrados',
-    'datos ya estan registrados', 'pedido registrado', 'pedido en proceso',
-    'tu pedido sera enviado', 'tu pedido saldra',
-    'confirmo que tus datos', 'datos confirmados',
-    'pedido ha sido registrado', 'gracias por tu compra',
-    'gracias por elegir sanate', 'gracias por tu confianza',
-    'recibiras la guia', 'recibiras tu guia', 'pronto recibiras',
-    'todo listo', 'confirmado y en proceso',
-    'pedido esta en proceso', 'datos estan registrados',
-  ];
-  return phrases.some(function(p) { return lower.includes(p); });
+function getUsageStats() {
+  return { ...usageStats, configLoaded: !!aiConfig.systemPrompt, enabled: aiConfig.enabled };
 }
+// ===================== MESSAGE HANDLER =====================
 
-// v4: Rate limit and cooldown
-function isRateLimited(chatId) {
-  const now = Date.now();
-  const entry = chatReplyCount.get(chatId);
-  if (!entry || (now - entry.windowStart) > 60000) {
-    chatReplyCount.set(chatId, { count: 0, windowStart: now });
-    return false;
-  }
-  return entry.count >= MAX_REPLIES_PER_MINUTE;
-}
-
-function recordReply(chatId) {
-  const now = Date.now();
-  const entry = chatReplyCount.get(chatId);
-  if (!entry || (now - entry.windowStart) > 60000) {
-    chatReplyCount.set(chatId, { count: 1, windowStart: now });
-  } else {
-    entry.count++;
-  }
-  recentBotReplies.set(chatId, now);
-}
-
-function isBotCooldown(chatId) {
-  const lastReply = recentBotReplies.get(chatId);
-  if (!lastReply) return false;
-  return (Date.now() - lastReply) < BOT_COOLDOWN_MS;
-}
-
-function limitEmojis(text, maxEmojis) {
-  if (maxEmojis === undefined) maxEmojis = 1;
-  var emojiRegex = /[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{2702}-\u{27B0}\u{FE0F}\u{200D}\u{20E3}\u{2328}\u{23CF}\u{23E9}-\u{23F3}\u{23F8}-\u{23FA}\u{25AA}\u{25AB}\u{25B6}\u{25C0}\u{25FB}-\u{25FE}\u{2934}\u{2935}\u{2B05}-\u{2B07}\u{2B1B}\u{2B1C}\u{2B50}\u{2B55}\u{3030}\u{303D}\u{3297}\u{3299}\u{2705}\u{2714}\u{2716}\u{274C}\u{274E}\u{2733}\u{2734}\u{2747}\u{2753}-\u{2755}\u{2757}\u{2763}\u{2764}\u{1F004}\u{1F0CF}\u{1F170}-\u{1F171}\u{1F17E}-\u{1F17F}\u{1F18E}\u{1F191}-\u{1F19A}\u{1F1E0}-\u{1F1FF}\u{1F201}-\u{1F202}\u{1F21A}\u{1F22F}\u{1F232}-\u{1F23A}\u{1F250}-\u{1F251}]/gu;
-  var count = 0;
-  return text.replace(emojiRegex, function(match) {
-    count++;
-    return count <= maxEmojis ? match : '';
-  }).replace(/  +/g, ' ').trim();
-}
-
-// Strip ALL emojis
-function stripAllEmojis(text) {
-  return limitEmojis(text, 0);
-}
-
-async function callGemini(systemPrompt, messages, apiK) {
-  messages = messages.filter(m => m.text && m.text.trim());
-  if (!messages.length) messages = [{ role: 'user', text: 'Hola' }];
-  
-  var contents = [];
-  for (var i = 0; i < messages.length; i++) {
-    var m = messages[i];
-    contents.push({
-      role: m.role === 'model' ? 'model' : 'user',
-      parts: [{ text: m.text || 'Hola' }]
-    });
-  }
-  // Gemini requires first message to be 'user'
-  if (contents.length > 0 && contents[0].role !== 'user') {
-    contents.unshift({ role: 'user', parts: [{ text: '.' }] });
-  }
-  
-  var body = {
-    contents: contents,
-    generationConfig: { temperature: 0.7, maxOutputTokens: 1024 }
-  };
-  if (systemPrompt && systemPrompt.trim()) {
-    body.system_instruction = { parts: [{ text: systemPrompt }] };
-  }
-  
-  var url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=' + apiK;
-  var resp = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
-  });
-  
-  if (!resp.ok) {
-    var err = await resp.text();
-    throw new Error('Gemini ' + resp.status + ': ' + err.substring(0, 200));
-  }
-  
-  var data = await resp.json();
-  if (!data.candidates || !data.candidates[0] || !data.candidates[0].content) {
-    throw new Error('Gemini: no candidates in response');
-  }
-  return data.candidates[0].content.parts.map(p => p.text).join('');
-}
-async function callClaude(systemPrompt, messages, apiKey) {
-  messages = messages.filter(m => m.text && m.text.trim());
-
-  var clean = [];
-  var lastRole = null;
-  for (var i = 0; i < messages.length; i++) {
-    var m = messages[i];
-    if (m.role === lastRole && clean.length > 0) {
-      clean[clean.length - 1].content += '\n' + m.content;
-    } else {
-      clean.push({ role: m.role, content: m.content });
-      lastRole = m.role;
-    }
-  }
-  var body = { model: 'claude-sonnet-4-20250514', max_tokens: 400, messages: clean };
-  if (systemPrompt) body.system = systemPrompt;
-  var resp = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01'
-    },
-    body: JSON.stringify(body)
-  });
-  if (!resp.ok) {
-    var err = await resp.text();
-    throw new Error('Claude ' + resp.status + ': ' + err.substring(0, 200));
-  }
-  var data = await resp.json();
-  return data.content && data.content[0] ? data.content[0].text : '';
-}
-
-async function callOpenAI(systemPrompt, messages, apiKey) {
-  messages = messages.filter(m => m.text && m.text.trim());
-
-  var msgs = [];
-  if (systemPrompt) msgs.push({ role: 'system', content: systemPrompt });
-  msgs.push.apply(msgs, messages);
-  var resp = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': 'Bearer ' + apiKey
-    },
-    body: JSON.stringify({
-      model: 'gpt-4o-mini', messages: msgs,
-      max_tokens: 400, temperature: 0.3
-    })
-  });
-  if (!resp.ok) {
-    var err = await resp.text();
-    throw new Error('OpenAI ' + resp.status + ': ' + err.substring(0, 200));
-  }
-  var data = await resp.json();
-  return data.choices && data.choices[0] ? data.choices[0].message.content : '';
-}
-
-// Debounce: combine rapid sequential messages before replying
-var pendingMessages = new Map();
-var DEBOUNCE_MS = 3000;
-
-function scheduleReply(chatId, senderName, messageText, messageType, sendFn) {
-  if (!pendingMessages.has(chatId)) {
-    pendingMessages.set(chatId, { messages: [], timer: null, senderName: senderName, sendFn: sendFn });
-  }
-  var pending = pendingMessages.get(chatId);
-  var txt = messageText || (messageType !== 'text' ? '[multimedia: ' + messageType + ']' : '');
-  if (txt) pending.messages.push(txt);
-  pending.senderName = senderName;
-  pending.sendFn = sendFn;
-  if (pending.timer) clearTimeout(pending.timer);
-  pending.timer = setTimeout(function() {
-    var combined = pending.messages.filter(Boolean).join('\n');
-    pendingMessages.delete(chatId);
-    if (combined) processReply(chatId, pending.senderName, combined, sendFn);
-  }, DEBOUNCE_MS);
-}
-
-async function handleIncomingMessage(chatId, senderName, messageText, messageType, sendFn, fromMe) {
+async function handleIncomingMessage(chatJid, messageText, pushName, messageId) {
+  // --- Guard checks ---
   if (!aiConfig.enabled) return;
-  if (chatId.includes('@g.us')) return;
+  if (!messageText || messageText.trim().length === 0) return;
+  if (!sock) return;
 
-  // v4: Skip own messages
-  if (fromMe === true) {
-    console.log('[auto-reply] Skipping own message (fromMe) -', chatId);
-    return;
+  // Check if bot should reply to this contact
+  if (aiConfig.msgMode === 'contacts') {
+    if (!aiConfig.contactMap[chatJid]) return;
+  }
+  // Even in 'all' mode, check if contact is explicitly disabled
+  if (aiConfig.contactMap[chatJid] === false) return;
+
+  // Dedup: don't reply to same message twice
+  if (processedReplies.has(messageId)) return;
+  processedReplies.add(messageId);
+  if (processedReplies.size > MAX_PROCESSED) {
+    const first = processedReplies.values().next().value;
+    processedReplies.delete(first);
   }
 
-  // v4: Cooldown check
-  if (isBotCooldown(chatId)) {
-    console.log('[auto-reply] Cooldown active, skipping -', chatId);
-    return;
+  // Add to conversation history
+  addToHistory(chatJid, 'user', messageText);
+
+  // Debounce: wait for user to finish typing (reset timer on each message)
+  if (replyTimers.has(chatJid)) {
+    clearTimeout(replyTimers.get(chatJid));
   }
 
-  // v4: Rate limit check
-  if (isRateLimited(chatId)) {
-    console.log('[auto-reply] Rate limited, skipping -', chatId);
-    return;
-  }
-
-  var useGemini = aiConfig.geminiKey && aiConfig.geminiKey.startsWith('AIza');
-  var useClaude = aiConfig.claudeKey && aiConfig.claudeKey.startsWith('sk-ant-');
-  var useOpenai = aiConfig.openaiKey && aiConfig.openaiKey.startsWith('sk-');
-  if (!useGemini && !useClaude && !useOpenai) return;
-
-  var map = aiConfig.contactMap || {};
-  var hasMap = Object.keys(map).length > 0;
-  if (hasMap) {
-    if (map[chatId] !== true) {
-      var phoneOnly = chatId.replace(/@s\.whatsapp\.net|@lid/g, '');
-      if (map[phoneOnly] !== true && map[phoneOnly + '@s.whatsapp.net'] !== true && map[phoneOnly + '@lid'] !== true) {
-        return;
-      }
-    }
-  }
-
-  if (isChatPaused(chatId)) {
-    console.log('[auto-reply] Chat PAUSED (sale) -', chatId);
-    return;
-  }
-
-  scheduleReply(chatId, senderName, messageText, messageType, sendFn);
+  const delay = (aiConfig.botDelay || 3) * 1000;
+  replyTimers.set(chatJid, setTimeout(async () => {
+    replyTimers.delete(chatJid);
+    await processReply(chatJid, pushName);
+  }, delay));
 }
 
-async function processReply(chatId, senderName, combinedText, sendFn) {
-  if (replyingTo.has(chatId)) {
-    console.log('[auto-reply] Already replying to', chatId);
+// ===================== PROCESS REPLY =====================
+
+async function processReply(chatJid, pushName) {
+  // Throttle: don't reply too fast to same chat
+  const now = Date.now();
+  const lastTime = lastReplyTime.get(chatJid) || 0;
+  if (now - lastTime < MIN_REPLY_INTERVAL) {
+    console.log('Throttled reply to', chatJid);
     return;
   }
-
-  // v4: Double check cooldown and rate limit
-  if (isBotCooldown(chatId)) {
-    console.log('[auto-reply] Cooldown at process time -', chatId);
-    return;
-  }
-  if (isRateLimited(chatId)) {
-    console.log('[auto-reply] Rate limited at process time -', chatId);
-    return;
-  }
-
-  // CHECK: if this chat was already confirmed, pause it now and don't reply
-  if (wasAlreadyConfirmed(chatId)) {
-    console.log('[auto-reply] Chat already confirmed, pausing -', chatId);
-    pauseChat(chatId, 'order_confirmed');
-    return;
-  }
-
-  var useGemini = aiConfig.geminiKey && aiConfig.geminiKey.startsWith('AIza');
-  var useClaude = aiConfig.claudeKey && aiConfig.claudeKey.startsWith('sk-ant-');
-  var provider = useGemini ? 'Gemini(FREE)' : useClaude ? 'Claude' : 'OpenAI';
-
-  console.log('[auto-reply] Processing', senderName, '(' + chatId + ') via', provider);
-  replyingTo.add(chatId);
 
   try {
-    addToHistory(chatId, 'user', combinedText);
+    // Build system prompt with rules
+    let systemPrompt = aiConfig.systemPrompt || 'Eres un asistente de ventas amable para Sanate, tienda de cosmeticos naturales.';
 
-    var delay = aiConfig.botDelay * 1000 + 400;
-    await new Promise(function(r) { setTimeout(r, delay); });
+    // Append critical rules
+    systemPrompt += '\n\nREGLA DE EMOJIS: ' + (aiConfig.useEmojis ? 'Usa MAXIMO 1-2 emojis por mensaje, solo cuando sea natural.' : 'NO uses emojis.');
+    systemPrompt += '\n\nREGLAS CRITICAS (OBLIGATORIO):';
+    systemPrompt += '\n1. Responde en MAXIMO 2-3 oraciones cortas. Nada de parrafos largos.';
+    systemPrompt += '\n2. NUNCA repitas el saludo si ya saludaste antes en la conversacion.';
+    systemPrompt += '\n3. Si el cliente ya dijo su nombre o ya lo saludaste, NO vuelvas a decir "Hola [nombre]".';
+    systemPrompt += '\n4. Lee el historial de la conversacion y CONTINUA desde donde quedo.';
+    systemPrompt += '\n5. Si el cliente pregunta por un producto, responde sobre ESE producto.';
+    systemPrompt += '\n6. Siempre termina con UNA pregunta de cierre.';
+    systemPrompt += '\n7. Nunca uses listas con viÃ±etas. Habla de forma natural y conversacional.';
+    systemPrompt += '\n8. Si no tienes info del producto, di que consultas con el equipo y respondes pronto.';
 
-    // v4: Check rate limit after delay
-    if (isRateLimited(chatId)) {
-      console.log('[auto-reply] Rate limited after delay -', chatId);
+    if (pushName) {
+      systemPrompt += '\n\nEl nombre del cliente es: ' + pushName;
+    }
+
+    // Get conversation history for context
+    const history = getHistory(chatJid);
+
+    // Call AI (Gemini primary, Claude fallback, OpenAI fallback)
+    let reply = null;
+    if (aiConfig.geminiKey) {
+      reply = await callGemini(systemPrompt, history);
+      if (reply) usageStats.geminiCalls++;
+    }
+    if (!reply && aiConfig.claudeKey) {
+      reply = await callClaude(systemPrompt, history);
+      if (reply) usageStats.claudeCalls++;
+    }
+    if (!reply && aiConfig.openaiKey) {
+      reply = await callOpenAI(systemPrompt, history);
+      if (reply) usageStats.openaiCalls++;
+    }
+
+    if (!reply) {
+      console.error('No AI provider returned a reply for', chatJid);
+      usageStats.errors++;
       return;
     }
 
-    // Double-check pause after delay (might have been paused while waiting)
-    if (isChatPaused(chatId)) {
-      console.log('[auto-reply] Chat paused during delay -', chatId);
-      return;
-    }
+    // Clean up reply
+    reply = cleanReply(reply);
 
-    var history = chatHistory.get(chatId) || [];
-    var messages = history.map(function(h) { return { role: h.role, content: h.content }; });
+    // Send the reply
+    await sock.sendMessage(chatJid, { text: reply });
+    lastReplyTime.set(chatJid, Date.now());
+    usageStats.totalReplies++;
+    usageStats.lastReply = new Date().toISOString();
 
-    // Build system prompt
-    var prompt = aiConfig.systemPrompt || '';
-    if (senderName) prompt += '\nEl cliente se llama: ' + senderName;
+    // Add bot reply to history
+    addToHistory(chatJid, 'model', reply);
 
-    // STRICT emoji rules
-    prompt += '\n\nREGLA DE EMOJIS: Usa MAXIMO 1 solo emoji en toda tu respuesta. Preferible 0. NUNCA pongas 2 o mas emojis.';
+    // Save to Supabase
+    const { saveMessage, upsertChat } = require('./supabase');
+    await saveMessage(chatJid, 'Sanate Bot', {
+      messageId: 'bot_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6),
+      text: reply,
+      type: 'text',
+      fromMe: true,
+      timestamp: Math.floor(Date.now() / 1000),
+    });
+    await upsertChat(chatJid, null, reply, Math.floor(Date.now() / 1000));
 
-    // STRICT sale rules
-    prompt += '\n\nREGLAS CRITICAS (OBLIGATORIO, NO VIOLAR NINGUNA):';
-    prompt += '\n1. Lee TODO el historial antes de responder. No pierdas el hilo.';
-    prompt += '\n2. Si el cliente ya eligio producto, NO cambies ni repitas la seleccion.';
-    prompt += '\n3. Para confirmar pedido necesitas: nombre + telefono + ciudad/direccion.';
-    prompt += '\n4. Cuando tengas los 3 datos, confirma UNA SOLA VEZ con este formato exacto:';
-    prompt += '\n   "Pedido confirmado: [producto]. Nombre: [X], Tel: [X], Ciudad: [X]. Pronto recibiras tu guia."';
-    prompt += '\n5. PROHIBIDO confirmar mas de 1 vez. Si ya confirmaste antes en el historial, NO vuelvas a confirmar.';
-    prompt += '\n6. PROHIBIDO pedir datos que el cliente ya dio.';
-    prompt += '\n7. Despues de confirmar, si el cliente escribe algo mas, responde SOLO: "Con gusto! Cualquier duda me escribes."';
-    prompt += '\n8. PROHIBIDO enviar mensajes largos despues de la confirmacion.';
-    prompt += '\n9. Responde corto y directo. Maximo 2-3 oraciones por mensaje.';
-    prompt += '\n10. NO uses asteriscos para negritas.';
-    prompt += '\n11. NO repitas informacion que ya enviaste. Si ya dijiste la ubicacion, precios, o datos de envio, NO los repitas.';
-    prompt += '\n12. Si el cliente no hizo una nueva pregunta, NO envies mas informacion. Solo responde cuando hay algo nuevo que decir.';
-
-    if (aiConfig.msgMode === 'partes') {
-      prompt += '\n\nFORMATO: Puedes dividir en 2 partes con ||||. Maximo 2 partes. Confirmacion = 1 sola parte.';
-    }
-
-    var reply;
-    if (useGemini) {
-      reply = await callGemini(prompt, messages, aiConfig.geminiKey);
-    } else if (useClaude) {
-      reply = await callClaude(prompt, messages, aiConfig.claudeKey);
-    } else {
-      reply = await callOpenAI(prompt, messages, aiConfig.openaiKey);
-    }
-
-    if (!reply) return;
-
-    recordUsage();
-    recordReply(chatId);
-
-    // POST-PROCESS: remove asterisks used for bold
-    reply = reply.replace(/\*+/g, '');
-
-    // POST-PROCESS: limit emojis across entire reply (max 1 total)
-    var maxEmoji = aiConfig.useEmojis ? 1 : 0;
-    reply = limitEmojis(reply, maxEmoji);
-
-    console.log('[auto-reply] Reply via', provider, 'len:', reply.length);
-
-    // CHECK: does this reply contain a confirmation?
-    var isConfirmation = detectOrderConfirmed(reply);
-
-    addToHistory(chatId, 'assistant', reply);
-
-    // Split into parts (max 2)
-    var parts = reply.split('||||').map(function(p) { return p.trim(); }).filter(Boolean);
-    if (parts.length > 2) parts = parts.slice(0, 2);
-    // If confirmation, force single message
-    if (isConfirmation) parts = [parts.join(' ')];
-
-    for (var i = 0; i < parts.length; i++) {
-      if (!parts[i]) continue;
-      try {
-        await sendFn(chatId, { text: parts[i] });
-        console.log('[auto-reply] Sent', (i + 1) + '/' + parts.length, 'to', chatId);
-      } catch (e) {
-        console.error('[auto-reply] Send error:', e.message);
-        break;
-      }
-      if (i < parts.length - 1) {
-        await new Promise(function(r) { setTimeout(r, Math.min(1200, 800 + parts[i].length * 5)); });
-      }
-    }
-
-    // If confirmation detected, pause IMMEDIATELY
-    if (isConfirmation) {
-      pauseChat(chatId, 'order_confirmed');
-      console.log('[auto-reply] ORDER CONFIRMED -', chatId, '- AI PAUSED IMMEDIATELY');
-    }
+    console.log('BOT -> ' + chatJid.split('@')[0] + ': ' + reply.substring(0, 80));
 
   } catch (err) {
-    console.error('[auto-reply] Error:', chatId, err.message);
-  } finally {
-    replyingTo.delete(chatId);
+    console.error('Error en processReply:', err.message);
+    usageStats.errors++;
   }
+    }
+// ===================== CONVERSATION HISTORY =====================
+
+function addToHistory(chatJid, role, text) {
+  if (!chatHistory.has(chatJid)) chatHistory.set(chatJid, []);
+  const hist = chatHistory.get(chatJid);
+  hist.push({ role, text, ts: Date.now() });
+  // Keep only last MAX_HISTORY messages
+  if (hist.length > MAX_HISTORY) hist.splice(0, hist.length - MAX_HISTORY);
+}
+
+function getHistory(chatJid) {
+  return chatHistory.get(chatJid) || [];
+}
+
+// ===================== AI PROVIDERS =====================
+
+async function callGemini(systemPrompt, history) {
+  try {
+    const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=' + aiConfig.geminiKey;
+
+    // Build Gemini conversation format
+    const contents = [];
+    for (const msg of history) {
+      contents.push({
+        role: msg.role === 'user' ? 'user' : 'model',
+        parts: [{ text: msg.text }]
+      });
+    }
+
+    // If no messages or last message is not from user, skip
+    if (contents.length === 0 || contents[contents.length - 1].role !== 'user') return null;
+
+    const body = {
+      system_instruction: { parts: [{ text: systemPrompt }] },
+      contents: contents,
+      generationConfig: {
+        temperature: 0.7,
+        maxOutputTokens: 300,
+        topP: 0.9,
+      }
+    };
+
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+    if (!resp.ok) {
+      const errText = await resp.text();
+      console.error('Gemini error ' + resp.status + ':', errText.substring(0, 200));
+      return null;
+    }
+
+    const data = await resp.json();
+    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    return text || null;
+  } catch (err) {
+    console.error('Gemini exception:', err.message);
+    return null;
+  }
+}
+
+async function callClaude(systemPrompt, history) {
+  try {
+    const messages = history.map(msg => ({
+      role: msg.role === 'user' ? 'user' : 'assistant',
+      content: msg.text,
+    }));
+
+    if (messages.length === 0 || messages[messages.length - 1].role !== 'user') return null;
+
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': aiConfig.claudeKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 300,
+        system: systemPrompt,
+        messages: messages,
+      }),
+    });
+
+    if (!resp.ok) {
+      const errText = await resp.text();
+      console.error('Claude error ' + resp.status + ':', errText.substring(0, 200));
+      return null;
+    }
+
+    const data = await resp.json();
+    return data?.content?.[0]?.text || null;
+  } catch (err) {
+    console.error('Claude exception:', err.message);
+    return null;
+  }
+}
+
+async function callOpenAI(systemPrompt, history) {
+  try {
+    const messages = [{ role: 'system', content: systemPrompt }];
+    for (const msg of history) {
+      messages.push({
+        role: msg.role === 'user' ? 'user' : 'assistant',
+        content: msg.text,
+      });
+    }
+
+    if (history.length === 0) return null;
+
+    const resp = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + aiConfig.openaiKey,
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        messages: messages,
+        max_tokens: 300,
+        temperature: 0.7,
+      }),
+    });
+
+    if (!resp.ok) {
+      const errText = await resp.text();
+      console.error('OpenAI error ' + resp.status + ':', errText.substring(0, 200));
+      return null;
+    }
+
+    const data = await resp.json();
+    return data?.choices?.[0]?.message?.content || null;
+  } catch (err) {
+    console.error('OpenAI exception:', err.message);
+    return null;
+  }
+}
+
+// ===================== UTILS =====================
+
+function cleanReply(text) {
+  if (!text) return '';
+  // Remove markdown bold/italic
+  text = text.replace(/\*\*/g, '').replace(/__/g, '');
+  // Remove excessive newlines
+  text = text.replace(/\n{3,}/g, '\n\n');
+  // Trim
+  text = text.trim();
+  // Limit length (WhatsApp friendly)
+  if (text.length > 500) text = text.substring(0, 497) + '...';
+  return text;
 }
 
 module.exports = {
+  initAutoReply,
+  updateSocket,
   handleIncomingMessage,
   getConfig,
   setConfig,
   getUsageStats,
-  pauseChat,
-  unpauseChat,
-  isChatPaused,
-  getPausedChats,
-  clearHistory,
-  initConfigStore,
   loadConfigFromSupabase,
-  callGemini,
-  callClaude,
-  callOpenAI
 };
