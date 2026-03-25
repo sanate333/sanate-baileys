@@ -2,16 +2,11 @@ const { default: makeWASocket, DisconnectReason, fetchLatestBaileysVersion, make
 const { Boom } = require('@hapi/boom');
 const pino = require('pino');
 const NodeCache = require('node-cache');
-const { saveMessage, updateMessageStatus, upsertChat, syncInitialChats } = require('./supabase');
-const { handleIncomingMessage } = require('./auto-reply');
+const { saveMessage, upsertChat, syncInitialChats } = require('./supabase');
 const { useSupabaseAuthState, clearAuth, saveAuthToSupabase } = require('./auth-store');
+const { handleIncomingMessage, updateSocket } = require('./auto-reply');
 
 let sock = null;
-
-// Anti-loop: track processed message IDs to prevent duplicate replies
-const processedMsgIds = new Set();
-function markProcessed(id) { processedMsgIds.add(id); if (processedMsgIds.size > 2000) processedMsgIds.delete(processedMsgIds.values().next().value); }
-
 let qrCode = null;
 let connectionState = 'disconnected';
 let sseManager = null;
@@ -20,7 +15,6 @@ let initialSyncDone = false;
 
 const photoCache = new NodeCache({ stdTTL: 900, checkperiod: 120 });
 const contactCache = new NodeCache({ stdTTL: 3600, checkperiod: 300 });
-const lidMap = new Map(); // Maps @lid JIDs to @s.whatsapp.net JIDs
 
 function getSocket() { return sock; }
 function getQR() { return qrCode; }
@@ -87,6 +81,8 @@ async function connectToWhatsApp() {
       if (sseManager) sseManager.broadcast({ type: 'connection', data: { status: 'connected' } });
       // Guardar sesion completa en Supabase al conectar
       saveAuthToSupabase(supabaseClient).catch(() => {});
+      // Update auto-reply socket reference
+      updateSocket(sock);
       if (!initialSyncDone) setTimeout(runInitialSync, 3000);
     }
   });
@@ -97,11 +93,7 @@ async function connectToWhatsApp() {
       if (isJidBroadcast(msg.key.remoteJid)) continue;
       if (msg.key.remoteJid === 'status@broadcast') continue;
 
-      let chatId = msg.key.remoteJid;
-      // Resolve @lid JIDs to phone number JIDs to avoid duplicates
-      if (chatId && chatId.endsWith('@lid') && lidMap.has(chatId)) {
-        chatId = lidMap.get(chatId);
-      };
+      const chatId = msg.key.remoteJid;
       const fromMe = msg.key.fromMe || false;
       const isGroup = isJidGroup(chatId);
       const pushName = msg.pushName || null;
@@ -131,47 +123,20 @@ async function connectToWhatsApp() {
         data: { chatId, messageId: msg.key.id, pushName, senderName, text: messageText, messageType, fromMe, isGroup, timestamp: Date.now() }
       });
 
-      // Server-side AI auto-reply (works without browser)
-      if (!fromMe && !isGroup && messageText && type === 'notify' && !processedMsgIds.has(msg.key.id)) {
-        markProcessed(msg.key.id);
-        handleIncomingMessage(chatId, senderName, messageText, messageType, sendMessage, fromMe).catch(err => {
-          console.error('[auto-reply] Unhandled error:', err.message);
+      // Auto-reply: only for incoming non-group text messages
+      if (!fromMe && !isGroup && messageText && type === 'notify') {
+        handleIncomingMessage(chatId, messageText, pushName || senderName, msg.key.id).catch(err => {
+          console.error('Auto-reply error:', err.message);
         });
       }
     }
   });
 
   sock.ev.on('contacts.update', (updates) => {
-    for (const { id, notify, lid } of updates) {
-        if (notify) contactCache.set(id, notify);
-        // Map LID to phone JID for deduplication
-        if (lid && id && id.endsWith('@s.whatsapp.net')) {
-          const lidJid = lid.endsWith('@lid') ? lid : lid + '@lid';
-          lidMap.set(lidJid, id);
-          if (notify) contactCache.set(lidJid, notify);
-        }
+    for (const { id, notify } of updates) {
+      if (notify) contactCache.set(id, notify);
     }
   });
-
-    sock.ev.on('messages.update', async (updates) => {
-      for (const { key, update } of updates) {
-        if (!update.status) continue;
-        const statusMap = { 2: 'delivered', 3: 'read', 4: 'played' };
-        const statusStr = statusMap[update.status];
-        if (!statusStr) continue;
-        let chatId = key.remoteJid;
-        if (chatId && chatId.endsWith('@lid') && lidMap.has(chatId)) {
-          chatId = lidMap.get(chatId);
-        }
-        const messageId = key.id;
-        console.log('[WA] Message status update:', messageId, statusStr);
-        await updateMessageStatus(messageId, statusStr);
-        if (sseManager) sseManager.broadcast({
-          type: 'message_status',
-          data: { chatId, messageId, status: statusStr }
-        });
-      }
-    });
 
   sock.ev.on('presence.update', (update) => {
     if (sseManager) sseManager.broadcast({ type: 'presence', data: update });
@@ -291,7 +256,7 @@ async function runInitialSync() {
     console.error('Error en sync inicial:', err.message);
     initialSyncDone = true;
   }
-}
+              }
 
 function extractText(msg) {
   const m = msg.message;
@@ -366,4 +331,4 @@ async function disconnect() {
   initialSyncDone = false;
 }
 
-module.exports = { initBaileys, getSocket, getQR, getConnectionState, getProfilePhoto, getContactName, sendMessage, disconnect, contactCache, lidMap };
+module.exports = { initBaileys, getSocket, getQR, getConnectionState, getProfilePhoto, getContactName, sendMessage, disconnect, contactCache };
