@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const QRCode = require('qrcode');
 const { getConnectionState, getQR, getProfilePhoto, getContactName, sendMessage, disconnect, getSocket, contactCache } = require('./baileys');
-const { getConfig, setConfig } = require('./auto-reply');
+const { getConfig, setConfig, getUsageStats, pauseChat, unpauseChat, isChatPaused, getPausedChats, clearHistory } = require('./auto-reply');
 const { getChats, getMessages, saveMessage, upsertChat } = require('./supabase');
 
 // Middleware: parse multipart/form-data text fields (no external deps)
@@ -32,7 +32,7 @@ function parseMultipart(req, res, next) {
 router.use(parseMultipart);
 
 function auth(req, res, next) {
-  const openPaths = ['/events', '/status', '/qr', '/settings', '/ai-config'];
+  const openPaths = ['/events', '/status', '/qr', '/settings', '/ai-config', '/ai-usage', '/ai-pause', '/ai-unpause', '/ai-paused'];
   if (openPaths.some(p => req.path === p || req.path.startsWith(p))) return next();
   if (process.env.API_SECRET) {
     const token = req.headers.authorization?.replace('Bearer ', '') || req.query.token || req.headers['x-api-key'];
@@ -378,6 +378,45 @@ router.post('/ai-reply', async (req, res) => {
     console.error('[ai-reply] Error:', err.message);
     res.status(500).json({ error: err.message });
   }
+});
+
+
+// --- AI USAGE STATS ---
+router.get('/ai-usage', (req, res) => {
+  res.json(getUsageStats());
+});
+
+// --- AI PAUSE/UNPAUSE (per-contact) ---
+router.post('/ai-pause', (req, res) => {
+  try {
+    const { chatId, reason } = req.body;
+    if (!chatId) return res.status(400).json({ error: 'chatId required' });
+    pauseChat(chatId, reason || 'manual');
+    res.json({ ok: true, chatId, paused: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+router.post('/ai-unpause', (req, res) => {
+  try {
+    const { chatId } = req.body;
+    if (!chatId) return res.status(400).json({ error: 'chatId required' });
+    unpauseChat(chatId);
+    res.json({ ok: true, chatId, paused: false });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+router.get('/ai-paused', (req, res) => {
+  res.json({ paused: getPausedChats() });
+});
+
+// --- AI CLEAR HISTORY ---
+router.post('/ai-clear-history', (req, res) => {
+  try {
+    const { chatId } = req.body;
+    if (!chatId) return res.status(400).json({ error: 'chatId required' });
+    clearHistory(chatId);
+    res.json({ ok: true, chatId, cleared: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 module.exports = router;
