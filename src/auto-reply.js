@@ -3,6 +3,9 @@
  * Fixes: message loop, rate limiting, confirmation loop, emoji flood
  */
 
+
+let _supabaseClient = null;
+
 let aiConfig = {
   enabled: false,
   geminiKey: '',
@@ -80,7 +83,74 @@ function setConfig(cfg) {
   if (cfg.contactMap) aiConfig.contactMap = cfg.contactMap;
   const provider = aiConfig.geminiKey ? 'gemini(FREE)' : aiConfig.claudeKey ? 'claude' : aiConfig.openaiKey ? 'openai' : 'none';
   console.log('[auto-reply] Config updated: enabled=' + aiConfig.enabled + ', provider=' + provider);
+
+  // Persist to Supabase
+  saveConfigToSupabase();
 }
+
+// === SUPABASE CONFIG PERSISTENCE ===
+function initConfigStore(supabase) {
+  _supabaseClient = supabase;
+  console.log('[AI Config] Supabase store initialized');
+}
+
+async function loadConfigFromSupabase() {
+  if (!_supabaseClient) { console.log('[AI Config] No Supabase client'); return false; }
+  try {
+    const { data, error } = await _supabaseClient
+      .from('oasis_wa_config')
+      .select('*')
+      .eq('id', 'default')
+      .single();
+    if (error || !data) {
+      console.log('[AI Config] No saved config in Supabase:', error?.message || 'no data');
+      return false;
+    }
+    // Map DB columns to aiConfig fields
+    if (data.enabled !== undefined && data.enabled !== null) aiConfig.enabled = data.enabled;
+    if (data.gemini_key) aiConfig.geminiKey = data.gemini_key;
+    if (data.claude_key) aiConfig.claudeKey = data.claude_key;
+    if (data.openai_key) aiConfig.openaiKey = data.openai_key;
+    if (data.system_prompt) aiConfig.systemPrompt = data.system_prompt;
+    if (data.bot_delay !== undefined && data.bot_delay !== null) aiConfig.botDelay = data.bot_delay;
+    if (data.msg_mode) aiConfig.msgMode = data.msg_mode;
+    if (data.use_emojis !== undefined && data.use_emojis !== null) aiConfig.useEmojis = data.use_emojis;
+    if (data.contact_map) aiConfig.contactMap = data.contact_map;
+    console.log('[AI Config] Loaded from Supabase - enabled:', aiConfig.enabled, 'provider:', aiConfig.geminiKey ? 'Gemini' : aiConfig.claudeKey ? 'Claude' : aiConfig.openaiKey ? 'OpenAI' : 'none');
+    return true;
+  } catch (e) {
+    console.error('[AI Config] Error loading from Supabase:', e.message);
+    return false;
+  }
+}
+
+async function saveConfigToSupabase() {
+  if (!_supabaseClient) return;
+  try {
+    const row = {
+      id: 'default',
+      enabled: aiConfig.enabled,
+      gemini_key: aiConfig.geminiKey || '',
+      claude_key: aiConfig.claudeKey || '',
+      openai_key: aiConfig.openaiKey || '',
+      system_prompt: aiConfig.systemPrompt || '',
+      bot_delay: aiConfig.botDelay,
+      msg_mode: aiConfig.msgMode || 'all',
+      use_emojis: aiConfig.useEmojis,
+      contact_map: aiConfig.contactMap || {},
+      updated_at: new Date().toISOString()
+    };
+    const { error } = await _supabaseClient
+      .from('oasis_wa_config')
+      .upsert(row, { onConflict: 'id' });
+    if (error) console.error('[AI Config] Save to Supabase failed:', error.message);
+    else console.log('[AI Config] Saved to Supabase');
+  } catch (e) {
+    console.error('[AI Config] Error saving to Supabase:', e.message);
+  }
+}
+
+
 
 function pauseChat(chatId, reason) {
   pausedChats.set(chatId, { reason: reason || 'order_confirmed', timestamp: Date.now() });
@@ -479,13 +549,15 @@ async function processReply(chatId, senderName, combinedText, sendFn) {
 }
 
 module.exports = {
-  handleIncomingMessage: handleIncomingMessage,
-  getConfig: getConfig,
-  setConfig: setConfig,
-  getUsageStats: getUsageStats,
-  pauseChat: pauseChat,
-  unpauseChat: unpauseChat,
-  isChatPaused: isChatPaused,
-  getPausedChats: getPausedChats,
-  clearHistory: clearHistory,
+  handleIncomingMessage,
+  getConfig,
+  setConfig,
+  getUsageStats,
+  pauseChat,
+  unpauseChat,
+  isChatPaused,
+  getPausedChats,
+  clearHistory,
+  initConfigStore,
+  loadConfigFromSupabase
 };
