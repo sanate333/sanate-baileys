@@ -254,42 +254,49 @@ function stripAllEmojis(text) {
   return limitEmojis(text, 0);
 }
 
-async function callGemini(systemPrompt, messages, apiKey) {
+async function callGemini(systemPrompt, messages, apiK) {
   messages = messages.filter(m => m.text && m.text.trim());
-
+  if (!messages.length) messages = [{ role: 'user', text: 'Hola' }];
+  
   var contents = [];
   for (var i = 0; i < messages.length; i++) {
     var m = messages[i];
     contents.push({
-      role: m.role === 'assistant' ? 'model' : 'user',
-      parts: [{ text: m.content }]
+      role: m.role === 'model' ? 'model' : 'user',
+      parts: [{ text: m.text || 'Hola' }]
     });
   }
-  if (contents.length > 0 && contents[0].role === 'model') {
-    contents.unshift({ role: 'user', parts: [{ text: '(inicio)' }] });
+  // Gemini requires first message to be 'user'
+  if (contents.length > 0 && contents[0].role !== 'user') {
+    contents.unshift({ role: 'user', parts: [{ text: '.' }] });
   }
+  
   var body = {
     contents: contents,
-    systemInstruction: systemPrompt ? { parts: [{ text: systemPrompt }] } : undefined,
-    generationConfig: { maxOutputTokens: 400, temperature: 0.3 }
+    generationConfig: { temperature: 0.7, maxOutputTokens: 1024 }
   };
-  var url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=' + apiKey;
+  if (systemPrompt && systemPrompt.trim()) {
+    body.system_instruction = { parts: [{ text: systemPrompt }] };
+  }
+  
+  var url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=' + apiK;
   var resp = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
   });
+  
   if (!resp.ok) {
     var err = await resp.text();
     throw new Error('Gemini ' + resp.status + ': ' + err.substring(0, 200));
   }
+  
   var data = await resp.json();
-  if (data.candidates && data.candidates[0] && data.candidates[0].content) {
-    return data.candidates[0].content.parts.map(function(p) { return p.text || ''; }).join('');
+  if (!data.candidates || !data.candidates[0] || !data.candidates[0].content) {
+    throw new Error('Gemini: no candidates in response');
   }
-  return '';
+  return data.candidates[0].content.parts.map(p => p.text).join('');
 }
-
 async function callClaude(systemPrompt, messages, apiKey) {
   messages = messages.filter(m => m.text && m.text.trim());
 
