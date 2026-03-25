@@ -1,6 +1,6 @@
 /**
- * Server-side AI Auto-Reply Module v2
- * Fixes: context loss, confirmation loop, emoji flood, auto-pause on sale
+ * Server-side AI Auto-Reply Module v3
+ * Fixes: confirmation loop, emoji flood, auto-pause, context
  */
 
 let aiConfig = {
@@ -18,6 +18,7 @@ let aiConfig = {
 const replyingTo = new Set();
 const chatHistory = new Map();
 const pausedChats = new Map();
+const confirmedChats = new Set(); // Track chats that already got a confirmation
 const MAX_HISTORY = 30;
 
 const usageData = { daily: {} };
@@ -77,10 +78,12 @@ function setConfig(cfg) {
 
 function pauseChat(chatId, reason) {
   pausedChats.set(chatId, { reason: reason || 'order_confirmed', timestamp: Date.now() });
+  confirmedChats.add(chatId);
   console.log('[auto-reply] PAUSED chat', chatId, 'reason:', reason);
 }
 function unpauseChat(chatId) {
   pausedChats.delete(chatId);
+  confirmedChats.delete(chatId);
   console.log('[auto-reply] UNPAUSED chat', chatId);
 }
 function isChatPaused(chatId) { return pausedChats.has(chatId); }
@@ -96,11 +99,28 @@ function addToHistory(chatId, role, content) {
   h.push({ role, content, ts: Date.now() });
   if (h.length > MAX_HISTORY) h.splice(0, h.length - MAX_HISTORY);
 }
-function clearHistory(chatId) { chatHistory.delete(chatId); }
+function clearHistory(chatId) {
+  chatHistory.delete(chatId);
+  confirmedChats.delete(chatId);
+}
 
-function detectOrderConfirmed(aiReply) {
-  const lower = aiReply.toLowerCase();
-  const phrases = [
+// Check if order was already confirmed in chat history
+function wasAlreadyConfirmed(chatId) {
+  if (confirmedChats.has(chatId)) return true;
+  const history = chatHistory.get(chatId) || [];
+  for (var i = 0; i < history.length; i++) {
+    if (history[i].role === 'assistant' && detectOrderConfirmed(history[i].content)) {
+      confirmedChats.add(chatId);
+      return true;
+    }
+  }
+  return false;
+}
+
+function detectOrderConfirmed(text) {
+  if (!text) return false;
+  var lower = text.toLowerCase();
+  var phrases = [
     'pedido confirmado', 'pedido esta confirmado', '100% confirmado',
     'orden confirmada', 'venta cerrada', 'datos registrados',
     'datos ya estan registrados', 'pedido registrado', 'pedido en proceso',
@@ -109,18 +129,25 @@ function detectOrderConfirmed(aiReply) {
     'pedido ha sido registrado', 'gracias por tu compra',
     'gracias por elegir sanate', 'gracias por tu confianza',
     'recibiras la guia', 'recibiras tu guia', 'pronto recibiras',
+    'todo listo', 'confirmado y en proceso',
+    'pedido esta en proceso', 'datos estan registrados',
   ];
   return phrases.some(function(p) { return lower.includes(p); });
 }
 
 function limitEmojis(text, maxEmojis) {
   if (maxEmojis === undefined) maxEmojis = 1;
-  var emojiRegex = /[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{2702}-\u{27B0}\u{FE0F}]/gu;
+  var emojiRegex = /[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{2702}-\u{27B0}\u{FE0F}\u{200D}\u{20E3}\u{2328}\u{23CF}\u{23E9}-\u{23F3}\u{23F8}-\u{23FA}\u{25AA}\u{25AB}\u{25B6}\u{25C0}\u{25FB}-\u{25FE}\u{2934}\u{2935}\u{2B05}-\u{2B07}\u{2B1B}\u{2B1C}\u{2B50}\u{2B55}\u{3030}\u{303D}\u{3297}\u{3299}\u{2705}\u{2714}\u{2716}\u{274C}\u{274E}\u{2733}\u{2734}\u{2747}\u{2753}-\u{2755}\u{2757}\u{2763}\u{2764}\u{1F004}\u{1F0CF}\u{1F170}-\u{1F171}\u{1F17E}-\u{1F17F}\u{1F18E}\u{1F191}-\u{1F19A}\u{1F1E0}-\u{1F1FF}\u{1F201}-\u{1F202}\u{1F21A}\u{1F22F}\u{1F232}-\u{1F23A}\u{1F250}-\u{1F251}]/gu;
   var count = 0;
   return text.replace(emojiRegex, function(match) {
     count++;
     return count <= maxEmojis ? match : '';
   }).replace(/  +/g, ' ').trim();
+}
+
+// Strip ALL emojis
+function stripAllEmojis(text) {
+  return limitEmojis(text, 0);
 }
 
 async function callGemini(systemPrompt, messages, apiKey) {
@@ -138,9 +165,9 @@ async function callGemini(systemPrompt, messages, apiKey) {
   var body = {
     contents: contents,
     systemInstruction: systemPrompt ? { parts: [{ text: systemPrompt }] } : undefined,
-    generationConfig: { maxOutputTokens: 600, temperature: 0.5 }
+    generationConfig: { maxOutputTokens: 400, temperature: 0.3 }
   };
-  var url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=' + apiKey;
+  var url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=' + apiKey;
   var resp = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -169,7 +196,7 @@ async function callClaude(systemPrompt, messages, apiKey) {
       lastRole = m.role;
     }
   }
-  var body = { model: 'claude-sonnet-4-20250514', max_tokens: 600, messages: clean };
+  var body = { model: 'claude-sonnet-4-20250514', max_tokens: 400, messages: clean };
   if (systemPrompt) body.system = systemPrompt;
   var resp = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -200,7 +227,7 @@ async function callOpenAI(systemPrompt, messages, apiKey) {
     },
     body: JSON.stringify({
       model: 'gpt-4o-mini', messages: msgs,
-      max_tokens: 600, temperature: 0.5
+      max_tokens: 400, temperature: 0.3
     })
   });
   if (!resp.ok) {
@@ -213,7 +240,7 @@ async function callOpenAI(systemPrompt, messages, apiKey) {
 
 // Debounce: combine rapid sequential messages before replying
 var pendingMessages = new Map();
-var DEBOUNCE_MS = 2500;
+var DEBOUNCE_MS = 3000;
 
 function scheduleReply(chatId, senderName, messageText, messageType, sendFn) {
   if (!pendingMessages.has(chatId)) {
@@ -266,6 +293,13 @@ async function processReply(chatId, senderName, combinedText, sendFn) {
     return;
   }
 
+  // CHECK: if this chat was already confirmed, pause it now and don't reply
+  if (wasAlreadyConfirmed(chatId)) {
+    console.log('[auto-reply] Chat already confirmed, pausing -', chatId);
+    pauseChat(chatId, 'order_confirmed');
+    return;
+  }
+
   var useGemini = aiConfig.geminiKey && aiConfig.geminiKey.startsWith('AIza');
   var useClaude = aiConfig.claudeKey && aiConfig.claudeKey.startsWith('sk-ant-');
   var provider = useGemini ? 'Gemini(FREE)' : useClaude ? 'Claude' : 'OpenAI';
@@ -279,30 +313,38 @@ async function processReply(chatId, senderName, combinedText, sendFn) {
     var delay = aiConfig.botDelay * 1000 + 400;
     await new Promise(function(r) { setTimeout(r, delay); });
 
+    // Double-check pause after delay (might have been paused while waiting)
+    if (isChatPaused(chatId)) {
+      console.log('[auto-reply] Chat paused during delay -', chatId);
+      return;
+    }
+
     var history = chatHistory.get(chatId) || [];
     var messages = history.map(function(h) { return { role: h.role, content: h.content }; });
 
+    // Build system prompt
     var prompt = aiConfig.systemPrompt || '';
     if (senderName) prompt += '\nEl cliente se llama: ' + senderName;
 
-    if (aiConfig.useEmojis) {
-      prompt += '\n\nEMOJIS: Usa MAXIMO 1 emoji por mensaje. Nunca 2 emojis juntos. Si no es necesario, no uses emoji.';
-    } else {
-      prompt += '\nPROHIBIDO usar emojis.';
-    }
+    // STRICT emoji rules
+    prompt += '\n\nREGLA DE EMOJIS: Usa MAXIMO 1 solo emoji en toda tu respuesta. Preferible 0. NUNCA pongas 2 o mas emojis.';
 
-    prompt += '\n\nREGLAS DE VENTA (OBLIGATORIO):';
-    prompt += '\n1. RECUERDA todo el historial. NUNCA pierdas el hilo.';
-    prompt += '\n2. Si el cliente ya eligio un combo, NO cambies el nombre ni numero.';
-    prompt += '\n3. Cuando el cliente da nombre + telefono + ciudad = DATOS COMPLETOS.';
-    prompt += '\n4. Con datos completos, confirma UNA SOLA VEZ: "Pedido confirmado [producto]. Nombre: [X], Tel: [X], Ciudad: [X]. Pronto recibiras tu guia. Gracias por elegir Sanate"';
-    prompt += '\n5. NUNCA confirmes mas de una vez. NUNCA repitas confirmacion.';
-    prompt += '\n6. NUNCA pidas datos ya proporcionados.';
-    prompt += '\n7. Post-confirmacion solo responde breve: "Con gusto! Cualquier duda me escribes"';
-    prompt += '\n8. Si ya confirmaste en el historial, NO vuelvas a confirmar.';
+    // STRICT sale rules
+    prompt += '\n\nREGLAS CRITICAS (OBLIGATORIO, NO VIOLAR NINGUNA):';
+    prompt += '\n1. Lee TODO el historial antes de responder. No pierdas el hilo.';
+    prompt += '\n2. Si el cliente ya eligio producto, NO cambies ni repitas la seleccion.';
+    prompt += '\n3. Para confirmar pedido necesitas: nombre + telefono + ciudad/direccion.';
+    prompt += '\n4. Cuando tengas los 3 datos, confirma UNA SOLA VEZ con este formato exacto:';
+    prompt += '\n   "Pedido confirmado: [producto]. Nombre: [X], Tel: [X], Ciudad: [X]. Pronto recibiras tu guia."';
+    prompt += '\n5. PROHIBIDO confirmar mas de 1 vez. Si ya confirmaste antes en el historial, NO vuelvas a confirmar.';
+    prompt += '\n6. PROHIBIDO pedir datos que el cliente ya dio.';
+    prompt += '\n7. Despues de confirmar, si el cliente escribe algo mas, responde SOLO: "Con gusto! Cualquier duda me escribes."';
+    prompt += '\n8. PROHIBIDO enviar mensajes largos despues de la confirmacion.';
+    prompt += '\n9. Responde corto y directo. Maximo 2-3 oraciones por mensaje.';
+    prompt += '\n10. NO uses asteriscos para negritas.';
 
     if (aiConfig.msgMode === 'partes') {
-      prompt += '\n\nFORMATO: Divide en 2-3 partes con ||||. Max 3 partes. Confirmacion = 1 sola parte sin dividir.';
+      prompt += '\n\nFORMATO: Puedes dividir en 2 partes con ||||. Maximo 2 partes. Confirmacion = 1 sola parte.';
     }
 
     var reply;
@@ -317,15 +359,26 @@ async function processReply(chatId, senderName, combinedText, sendFn) {
     if (!reply) return;
 
     recordUsage();
-    console.log('[auto-reply] Reply via', provider, 'len:', reply.length, 'usage:', getUsageStats().today);
+
+    // POST-PROCESS: remove asterisks used for bold
+    reply = reply.replace(/\*+/g, '');
+
+    // POST-PROCESS: limit emojis across entire reply (max 1 total)
+    var maxEmoji = aiConfig.useEmojis ? 1 : 0;
+    reply = limitEmojis(reply, maxEmoji);
+
+    console.log('[auto-reply] Reply via', provider, 'len:', reply.length);
+
+    // CHECK: does this reply contain a confirmation?
+    var isConfirmation = detectOrderConfirmed(reply);
 
     addToHistory(chatId, 'assistant', reply);
 
+    // Split into parts (max 2)
     var parts = reply.split('||||').map(function(p) { return p.trim(); }).filter(Boolean);
-    if (parts.length > 3) parts = parts.slice(0, 3);
-
-    var maxEmoji = aiConfig.useEmojis ? 1 : 0;
-    parts = parts.map(function(p) { return limitEmojis(p, maxEmoji); });
+    if (parts.length > 2) parts = parts.slice(0, 2);
+    // If confirmation, force single message
+    if (isConfirmation) parts = [parts.join(' ')];
 
     for (var i = 0; i < parts.length; i++) {
       if (!parts[i]) continue;
@@ -341,9 +394,10 @@ async function processReply(chatId, senderName, combinedText, sendFn) {
       }
     }
 
-    if (detectOrderConfirmed(reply)) {
+    // If confirmation detected, pause IMMEDIATELY
+    if (isConfirmation) {
       pauseChat(chatId, 'order_confirmed');
-      console.log('[auto-reply] ORDER CONFIRMED -', chatId, '- AI PAUSED');
+      console.log('[auto-reply] ORDER CONFIRMED -', chatId, '- AI PAUSED IMMEDIATELY');
     }
 
   } catch (err) {
