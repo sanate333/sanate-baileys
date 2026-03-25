@@ -7,6 +7,11 @@ const { handleIncomingMessage } = require('./auto-reply');
 const { useSupabaseAuthState, clearAuth, saveAuthToSupabase } = require('./auth-store');
 
 let sock = null;
+
+// Anti-loop: track processed message IDs to prevent duplicate replies
+const processedMsgIds = new Set();
+function markProcessed(id) { processedMsgIds.add(id); if (processedMsgIds.size > 2000) processedMsgIds.delete(processedMsgIds.values().next().value); }
+
 let qrCode = null;
 let connectionState = 'disconnected';
 let sseManager = null;
@@ -127,8 +132,9 @@ async function connectToWhatsApp() {
       });
 
       // Server-side AI auto-reply (works without browser)
-      if (!fromMe && !isGroup && messageText) {
-        handleIncomingMessage(chatId, senderName, messageText, messageType, sendMessage).catch(err => {
+      if (!fromMe && !isGroup && messageText && type === 'notify' && !processedMsgIds.has(msg.key.id)) {
+        markProcessed(msg.key.id);
+        handleIncomingMessage(chatId, senderName, messageText, messageType, sendMessage, fromMe).catch(err => {
           console.error('[auto-reply] Unhandled error:', err.message);
         });
       }

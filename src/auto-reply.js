@@ -1,6 +1,6 @@
 /**
- * Server-side AI Auto-Reply Module v3
- * Fixes: confirmation loop, emoji flood, auto-pause, context
+ * Server-side AI Auto-Reply Module v4
+ * Fixes: message loop, rate limiting, confirmation loop, emoji flood
  */
 
 let aiConfig = {
@@ -20,6 +20,12 @@ const chatHistory = new Map();
 const pausedChats = new Map();
 const confirmedChats = new Set(); // Track chats that already got a confirmation
 const MAX_HISTORY = 30;
+
+// v4: Anti-loop protection
+const recentBotReplies = new Map();
+const chatReplyCount = new Map();
+const MAX_REPLIES_PER_MINUTE = 3;
+const BOT_COOLDOWN_MS = 5000;
 
 const usageData = { daily: {} };
 
@@ -133,6 +139,34 @@ function detectOrderConfirmed(text) {
     'pedido esta en proceso', 'datos estan registrados',
   ];
   return phrases.some(function(p) { return lower.includes(p); });
+}
+
+// v4: Rate limit and cooldown
+function isRateLimited(chatId) {
+  const now = Date.now();
+  const entry = chatReplyCount.get(chatId);
+  if (!entry || (now - entry.windowStart) > 60000) {
+    chatReplyCount.set(chatId, { count: 0, windowStart: now });
+    return false;
+  }
+  return entry.count >= MAX_REPLIES_PER_MINUTE;
+}
+
+function recordReply(chatId) {
+  const now = Date.now();
+  const entry = chatReplyCount.get(chatId);
+  if (!entry || (now - entry.windowStart) > 60000) {
+    chatReplyCount.set(chatId, { count: 1, windowStart: now });
+  } else {
+    entry.count++;
+  }
+  recentBotReplies.set(chatId, now);
+}
+
+function isBotCooldown(chatId) {
+  const lastReply = recentBotReplies.get(chatId);
+  if (!lastReply) return false;
+  return (Date.now() - lastReply) < BOT_COOLDOWN_MS;
 }
 
 function limitEmojis(text, maxEmojis) {
@@ -259,9 +293,27 @@ function scheduleReply(chatId, senderName, messageText, messageType, sendFn) {
   }, DEBOUNCE_MS);
 }
 
-async function handleIncomingMessage(chatId, senderName, messageText, messageType, sendFn) {
+async function handleIncomingMessage(chatId, senderName, messageText, messageType, sendFn, fromMe) {
   if (!aiConfig.enabled) return;
   if (chatId.includes('@g.us')) return;
+
+  // v4: Skip own messages
+  if (fromMe === true) {
+    console.log('[auto-reply] Skipping own message (fromMe) -', chatId);
+    return;
+  }
+
+  // v4: Cooldown check
+  if (isBotCooldown(chatId)) {
+    console.log('[auto-reply] Cooldown active, skipping -', chatId);
+    return;
+  }
+
+  // v4: Rate limit check
+  if (isRateLimited(chatId)) {
+    console.log('[auto-reply] Rate limited, skipping -', chatId);
+    return;
+  }
 
   var useGemini = aiConfig.geminiKey && aiConfig.geminiKey.startsWith('AIza');
   var useClaude = aiConfig.claudeKey && aiConfig.claudeKey.startsWith('sk-ant-');
@@ -293,6 +345,16 @@ async function processReply(chatId, senderName, combinedText, sendFn) {
     return;
   }
 
+  // v4: Double check cooldown and rate limit
+  if (isBotCooldown(chatId)) {
+    console.log('[auto-reply] Cooldown at process time -', chatId);
+    return;
+  }
+  if (isRateLimited(chatId)) {
+    console.log('[auto-reply] Rate limited at process time -', chatId);
+    return;
+  }
+
   // CHECK: if this chat was already confirmed, pause it now and don't reply
   if (wasAlreadyConfirmed(chatId)) {
     console.log('[auto-reply] Chat already confirmed, pausing -', chatId);
@@ -312,6 +374,12 @@ async function processReply(chatId, senderName, combinedText, sendFn) {
 
     var delay = aiConfig.botDelay * 1000 + 400;
     await new Promise(function(r) { setTimeout(r, delay); });
+
+    // v4: Check rate limit after delay
+    if (isRateLimited(chatId)) {
+      console.log('[auto-reply] Rate limited after delay -', chatId);
+      return;
+    }
 
     // Double-check pause after delay (might have been paused while waiting)
     if (isChatPaused(chatId)) {
@@ -342,6 +410,8 @@ async function processReply(chatId, senderName, combinedText, sendFn) {
     prompt += '\n8. PROHIBIDO enviar mensajes largos despues de la confirmacion.';
     prompt += '\n9. Responde corto y directo. Maximo 2-3 oraciones por mensaje.';
     prompt += '\n10. NO uses asteriscos para negritas.';
+    prompt += '\n11. NO repitas informacion que ya enviaste. Si ya dijiste la ubicacion, precios, o datos de envio, NO los repitas.';
+    prompt += '\n12. Si el cliente no hizo una nueva pregunta, NO envies mas informacion. Solo responde cuando hay algo nuevo que decir.';
 
     if (aiConfig.msgMode === 'partes') {
       prompt += '\n\nFORMATO: Puedes dividir en 2 partes con ||||. Maximo 2 partes. Confirmacion = 1 sola parte.';
@@ -359,6 +429,7 @@ async function processReply(chatId, senderName, combinedText, sendFn) {
     if (!reply) return;
 
     recordUsage();
+    recordReply(chatId);
 
     // POST-PROCESS: remove asterisks used for bold
     reply = reply.replace(/\*+/g, '');
