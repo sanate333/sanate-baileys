@@ -255,6 +255,8 @@ function stripAllEmojis(text) {
 }
 
 async function callGemini(systemPrompt, messages, apiKey) {
+  messages = messages.filter(m => m.text && m.text.trim());
+
   var contents = [];
   for (var i = 0; i < messages.length; i++) {
     var m = messages[i];
@@ -289,6 +291,8 @@ async function callGemini(systemPrompt, messages, apiKey) {
 }
 
 async function callClaude(systemPrompt, messages, apiKey) {
+  messages = messages.filter(m => m.text && m.text.trim());
+
   var clean = [];
   var lastRole = null;
   for (var i = 0; i < messages.length; i++) {
@@ -320,6 +324,8 @@ async function callClaude(systemPrompt, messages, apiKey) {
 }
 
 async function callOpenAI(systemPrompt, messages, apiKey) {
+  messages = messages.filter(m => m.text && m.text.trim());
+
   var msgs = [];
   if (systemPrompt) msgs.push({ role: 'system', content: systemPrompt });
   msgs.push.apply(msgs, messages);
