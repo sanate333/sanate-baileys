@@ -279,7 +279,7 @@ async function callGemini(systemPrompt, messages, apiK) {
     body.system_instruction = { parts: [{ text: systemPrompt }] };
   }
   
-  var url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=' + apiK;
+  var url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=' + apiK;
   var resp = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
