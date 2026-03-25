@@ -559,5 +559,8 @@ module.exports = {
   getPausedChats,
   clearHistory,
   initConfigStore,
-  loadConfigFromSupabase
+  loadConfigFromSupabase,
+  callGemini,
+  callClaude,
+  callOpenAI
 };

@@ -3,7 +3,7 @@ const router = express.Router();
 const QRCode = require('qrcode');
 const { getConnectionState, getQR, getProfilePhoto, getContactName, sendMessage, disconnect, getSocket, contactCache } = require('./baileys');
 const { getChats, getMessages, saveMessage, upsertChat } = require('./supabase');
-const { getConfig, setConfig, getUsageStats } = require('./auto-reply');
+const { getConfig, setConfig, getUsageStats, callGemini, callClaude, callOpenAI } = require('./auto-reply');
 
 // Middleware: parse multipart/form-data text fields (no external deps)
 function parseMultipart(req, res, next) {
@@ -262,6 +262,49 @@ router.post('/ai-config', (req, res) => {
 router.get('/ai-usage', (req, res) => {
   try { res.json(getUsageStats()); }
   catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+
+// ── AI Reply endpoint (dashboard manual IA) ──────────────────
+router.post('/ai-reply', async (req, res) => {
+  try {
+    const { text, systemPrompt, history, chatId, clientName } = req.body;
+    const config = getConfig();
+    
+    // Build messages array from history
+    const messages = [];
+    if (history && Array.isArray(history)) {
+      history.forEach(h => {
+        messages.push({ role: h.role === 'assistant' ? 'model' : 'user', text: h.content || h.text || '' });
+      });
+    }
+    // Add the current message
+    messages.push({ role: 'user', text: text || '' });
+    
+    const prompt = systemPrompt || config.systemPrompt || '';
+    let reply = null;
+    
+    // Try Gemini first, then Claude, then OpenAI
+    if (config.geminiKey) {
+      reply = await callGemini(prompt, messages, config.geminiKey);
+    } else if (config.claudeKey) {
+      reply = await callClaude(prompt, messages, config.claudeKey);
+    } else if (config.openaiKey) {
+      reply = await callOpenAI(prompt, messages, config.openaiKey);
+    } else {
+      return res.status(400).json({ error: 'no_key', message: 'No AI key configured' });
+    }
+    
+    if (!reply) {
+      return res.status(500).json({ error: 'no_reply', message: 'AI returned empty response' });
+    }
+    
+    console.log('[ai-reply] Generated reply for', chatId, ':', reply.substring(0, 80) + '...');
+    res.json({ reply });
+  } catch (e) {
+    console.error('[ai-reply] Error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 module.exports = router;
