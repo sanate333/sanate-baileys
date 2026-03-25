@@ -194,9 +194,6 @@ router.get('/contacts', async (req, res) => {
     const enriched = (data || []).map(c => ({ ...c, live_name: getContactName(c.jid) || c.name || c.phone }));
     res.json({ clients: enriched, total: enriched.length });
   } catch (err) { res.status(500).json({ error: err.message }); }
-});phone }));
-    res.json({ clients: enriched, total: enriched.length });
-  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // --- POST /settings (frontend syncSettingsToBackend sends here) ---
