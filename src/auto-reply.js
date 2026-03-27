@@ -191,7 +191,6 @@ async function processReply(chatJid, pushName) {
 
     // Mode-specific instructions for partes
     if (aiConfig.msgMode === 'partes') {
-    if (aiConfig.msgMode === 'partes') {
       const pc = aiConfig.partesCount || 3;
       systemPrompt += '\n\nMODO ENVIO POR PARTES (MUY IMPORTANTE):';
       systemPrompt += '\n- Escribe tu respuesta en ' + pc + ' parrafos CORTOS separados por doble salto de linea.';
