@@ -261,6 +261,7 @@ async function processReply(chatJid, pushName) {
 
     // Save to Supabase
     const { saveMessage, upsertChat } = require('./supabase');
+    if (aiConfig.msgMode !== 'partes') {
     await saveMessage(chatJid, 'Sanate Bot', {
       messageId: 'bot_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6),
       text: reply,
@@ -268,6 +269,7 @@ async function processReply(chatJid, pushName) {
       fromMe: true,
       timestamp: Math.floor(Date.now() / 1000),
     });
+    }
     await upsertChat(chatJid, null, reply, Math.floor(Date.now() / 1000));
 
     console.log('BOT -> ' + chatJid.split('@')[0] + ': ' + reply.substring(0, 80));
