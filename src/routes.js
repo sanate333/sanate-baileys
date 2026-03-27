@@ -72,7 +72,6 @@ router.get('/chats', async (req, res) => {
     const limit = parseInt(req.query.limit) || 100;
     const chats = await getChats(limit);
     const enriched = chats.map(chat => {
-      // Extraer numero limpio del JID
       const jidNum = (chat.jid || '').replace(/@s\.whatsapp\.net|@g\.us|@c\.us|@lid/g, '');
       const phone = chat.phone || (/^\d{7,}$/.test(jidNum) ? '+' + jidNum : '');
       const contactName = getContactName(chat.jid);
@@ -103,7 +102,6 @@ router.get('/chats/:chatId/messages', async (req, res) => {
     const limit = parseInt(req.query.limit) || 50;
     const before = req.query.before || null;
     const messages = await getMessages(chatId, limit, before);
-    // Transformar campos para el frontend (normMsg espera text, direction, type)
     const mapped = messages.map(m => ({
       ...m,
       id: m.message_id || m.id,
@@ -134,7 +132,6 @@ router.get('/events', (req, res) => {
   sse.addClient(req, res);
 });
 
-// Route alias: frontend sends to /chats/:chatId/send
 router.post('/chats/:chatId/send', async (req, res) => {
   try {
     const chatId = decodeURIComponent(req.params.chatId);
@@ -183,7 +180,7 @@ router.post('/disconnect', async (req, res) => {
 
 router.get('/settings', (req, res) => {
   res.json({
-    server: 'sanate-wa-server', version: '2.0.0', engine: 'baileys-standalone',
+    server: 'sanate-wa-server', version: '3.0.0', engine: 'baileys-standalone',
     connection: getConnectionState(), sse: req.app.get('sse')?.getStatus(),
     supabase: !!req.app.get('supabase'), uptime: Math.floor(process.uptime()),
     contacts: contactCache.keys().length
@@ -201,11 +198,9 @@ router.get('/contacts', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- POST /settings (frontend syncSettingsToBackend sends here) ---
 router.post('/settings', (req, res) => {
   try {
     const b = req.body || {};
-    // Map frontend field names to aiConfig field names
     const cfg = {};
     if (b.botEnabled !== undefined) cfg.enabled = b.botEnabled;
     if (b.openaiKey) cfg.openaiKey = b.openaiKey;
@@ -217,9 +212,10 @@ router.post('/settings', (req, res) => {
     if (b.botDelay !== undefined) cfg.botDelay = b.botDelay;
     if (b.geminiKey) cfg.geminiKey = b.geminiKey;
     if (b.claudeKey) cfg.claudeKey = b.claudeKey;
-    // Also accept direct aiConfig fields
     if (b.enabled !== undefined) cfg.enabled = b.enabled;
     if (b.contactMap) cfg.contactMap = b.contactMap;
+    if (b.partesCount !== undefined) cfg.partesCount = b.partesCount;
+    if (b.testWhitelist !== undefined) cfg.testWhitelist = b.testWhitelist;
     setConfig(cfg);
     res.json({ ok: true, settings: 'synced' });
   } catch (err) {
@@ -227,8 +223,8 @@ router.post('/settings', (req, res) => {
   }
 });
 
-// --- AI CONFIG ENDPOINTS (server-side auto-reply settings) ---
-// GET returns FULL config so ANY browser/PC can load it (config lives on server)
+// --- AI CONFIG ENDPOINTS ---
+// GET returns FULL config so ANY browser/PC can load it
 router.get('/ai-config', (req, res) => {
   const cfg = getConfig();
   res.json({
@@ -241,6 +237,8 @@ router.get('/ai-config', (req, res) => {
     botDelay: cfg.botDelay,
     msgMode: cfg.msgMode,
     useEmojis: cfg.useEmojis,
+    partesCount: cfg.partesCount,
+    testWhitelist: cfg.testWhitelist || [],
     hasGeminiKey: !!cfg.geminiKey,
     hasClaudeKey: !!cfg.claudeKey,
     hasOpenaiKey: !!cfg.openaiKey,
@@ -262,6 +260,8 @@ router.post('/ai-config', (req, res) => {
       hasOpenaiKey: !!updated.openaiKey,
       botDelay: updated.botDelay,
       msgMode: updated.msgMode,
+      partesCount: updated.partesCount,
+      testWhitelist: updated.testWhitelist || [],
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
