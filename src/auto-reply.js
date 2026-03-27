@@ -188,6 +188,15 @@ async function processReply(chatJid, pushName) {
     systemPrompt += '\n7. Nunca uses listas con viÃ±etas. Habla de forma natural y conversacional.';
     systemPrompt += '\n8. Si no tienes info del producto, di que consultas con el equipo y respondes pronto.';
 
+    // Mode-specific instructions for partes
+    if (aiConfig.msgMode === 'partes') {
+      systemPrompt += '\n\nMODO ENVIO POR PARTES (MUY IMPORTANTE):';
+      systemPrompt += '\n- Escribe tu respuesta en 2-3 parrafos CORTOS separados por doble salto de linea.';
+      systemPrompt += '\n- Cada parrafo debe ser 1-2 oraciones maximo, como un mensaje de WhatsApp real.';
+      systemPrompt += '\n- Usa POCOS emojis estrategicos: solo 1 emoji al inicio o final del PRIMER parrafo y 1 en el ULTIMO. Nada en el medio.';
+      systemPrompt += '\n- Ejemplo de formato: "Parrafo1\\n\\nParrafo2\\n\\nParrafo3"';
+    }
+
     if (pushName) {
       systemPrompt += '\n\nEl nombre del cliente es: ' + pushName;
     }
@@ -220,7 +229,19 @@ async function processReply(chatJid, pushName) {
     reply = cleanReply(reply);
 
     // Send the reply
-    await sock.sendMessage(chatJid, { text: reply });
+    // Send the reply (single or in parts)
+    if (aiConfig.msgMode === 'partes' && reply.length > 80) {
+      const parts = splitIntoParts(reply);
+      for (let i = 0; i < parts.length; i++) {
+        await sock.sendMessage(chatJid, { text: parts[i].trim() });
+        if (i < parts.length - 1) {
+          await new Promise(r => setTimeout(r, 1500 + Math.floor(Math.random() * 1500)));
+        }
+      }
+      console.log('BOT [partes] -> ' + chatJid.split('@')[0] + ': ' + parts.length + ' msgs');
+    } else {
+      await sock.sendMessage(chatJid, { text: reply });
+    }
     lastReplyTime.set(chatJid, Date.now());
     usageStats.totalReplies++;
     usageStats.lastReply = new Date().toISOString();
@@ -388,6 +409,30 @@ async function callOpenAI(systemPrompt, history) {
 }
 
 // ===================== UTILS =====================
+
+
+// ===================== SPLIT INTO PARTS (msgMode partes) =====================
+function splitIntoParts(text) {
+  if (!text || text.length < 80) return [text];
+  
+  // Try splitting by double newline first
+  let parts = text.split(/\n\n+/).filter(p => p.trim().length > 0);
+  if (parts.length >= 2 && parts.length <= 4) return parts.slice(0, 3);
+  
+  // Try splitting by sentence endings (. ? !)
+  const sentences = text.match(/[^.!?]+[.!?]+/g) || [text];
+  if (sentences.length <= 1) return [text];
+  
+  // Group sentences into 2-3 parts
+  const targetParts = Math.min(3, Math.max(2, Math.ceil(sentences.length / 2)));
+  const perPart = Math.ceil(sentences.length / targetParts);
+  parts = [];
+  for (let i = 0; i < sentences.length; i += perPart) {
+    const chunk = sentences.slice(i, i + perPart).join('').trim();
+    if (chunk) parts.push(chunk);
+  }
+  return parts.slice(0, 3);
+}
 
 function cleanReply(text) {
   if (!text) return '';
