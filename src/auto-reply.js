@@ -18,6 +18,7 @@ let aiConfig = {
   botDelay: 3,        // seconds before replying
   msgMode: 'all',     // 'all' | 'contacts' (only those in contactMap)
   useEmojis: true,
+  partesCount: 3,
 };
 
 // --- Conversation history (in-memory, persists until restart) ---
@@ -190,11 +191,21 @@ async function processReply(chatJid, pushName) {
 
     // Mode-specific instructions for partes
     if (aiConfig.msgMode === 'partes') {
+    if (aiConfig.msgMode === 'partes') {
+      const pc = aiConfig.partesCount || 3;
       systemPrompt += '\n\nMODO ENVIO POR PARTES (MUY IMPORTANTE):';
-      systemPrompt += '\n- Escribe tu respuesta en 2-3 parrafos CORTOS separados por doble salto de linea.';
+      systemPrompt += '\n- Escribe tu respuesta en ' + pc + ' parrafos CORTOS separados por doble salto de linea.';
       systemPrompt += '\n- Cada parrafo debe ser 1-2 oraciones maximo, como un mensaje de WhatsApp real.';
-      systemPrompt += '\n- Usa POCOS emojis estrategicos: solo 1 emoji al inicio o final del PRIMER parrafo y 1 en el ULTIMO. Nada en el medio.';
-      systemPrompt += '\n- Ejemplo de formato: "Parrafo1\\n\\nParrafo2\\n\\nParrafo3"';
+      systemPrompt += '\n- Usa entre 2 y 3 emojis POR CADA parrafo, SIEMPRE contextuales a lo que dices (no genericos).';
+      systemPrompt += '\n- Elige emojis que refuercen el mensaje: productos usa emojis de naturaleza/belleza, precios usa emojis de dinero, saludos usa emojis amigables, envios usa emojis de paquetes/camion.';
+      systemPrompt += '\n- NO repitas el mismo emoji en parrafos diferentes. Varia siempre.';
+      systemPrompt += '\n- Formato: "Parrafo1\\n\\nParrafo2\\n\\nParrafo3" (exactamente ' + pc + ' parrafos).';
+    } else {
+      // Modo completo: maximo 1-2 emojis en todo el mensaje
+      systemPrompt += '\n\nUSO DE EMOJIS (modo completo):';
+      systemPrompt += '\n- Usa MAXIMO 1 a 2 emojis en TODA tu respuesta, bien elegidos segun el contexto.';
+      systemPrompt += '\n- Elige emojis que encajen con el tema: naturaleza para productos naturales, caritas para saludos, etc.';
+      systemPrompt += '\n- Si el mensaje es corto o formal, puedes no usar ninguno.';
     }
 
     if (pushName) {
@@ -231,7 +242,7 @@ async function processReply(chatJid, pushName) {
     // Send the reply
     // Send the reply (single or in parts)
     if (aiConfig.msgMode === 'partes' && reply.length > 80) {
-      const parts = splitIntoParts(reply);
+      const parts = splitIntoParts(reply, aiConfig.partesCount || 3);
       for (let i = 0; i < parts.length; i++) {
         await sock.sendMessage(chatJid, { text: parts[i].trim() });
         if (i < parts.length - 1) {
@@ -412,26 +423,27 @@ async function callOpenAI(systemPrompt, history) {
 
 
 // ===================== SPLIT INTO PARTS (msgMode partes) =====================
-function splitIntoParts(text) {
+function splitIntoParts(text, maxParts) {
+  maxParts = maxParts || 3;
   if (!text || text.length < 80) return [text];
   
   // Try splitting by double newline first
   let parts = text.split(/\n\n+/).filter(p => p.trim().length > 0);
-  if (parts.length >= 2 && parts.length <= 4) return parts.slice(0, 3);
+  if (parts.length >= 2 && parts.length <= maxParts) return parts.slice(0, maxParts);
   
   // Try splitting by sentence endings (. ? !)
   const sentences = text.match(/[^.!?]+[.!?]+/g) || [text];
   if (sentences.length <= 1) return [text];
   
-  // Group sentences into 2-3 parts
-  const targetParts = Math.min(3, Math.max(2, Math.ceil(sentences.length / 2)));
+  // Group sentences into targetParts (based on maxParts)
+  const targetParts = Math.min(maxParts, Math.max(2, sentences.length));
   const perPart = Math.ceil(sentences.length / targetParts);
   parts = [];
   for (let i = 0; i < sentences.length; i += perPart) {
     const chunk = sentences.slice(i, i + perPart).join('').trim();
     if (chunk) parts.push(chunk);
   }
-  return parts.slice(0, 3);
+  return parts.slice(0, maxParts);
 }
 
 function cleanReply(text) {
