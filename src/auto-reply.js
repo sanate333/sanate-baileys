@@ -14,11 +14,12 @@ let aiConfig = {
   claudeKey: '',
   openaiKey: '',
   systemPrompt: '',
-  contactMap: {},     // { "jid": true/false } ÃÂ¢ÃÂÃÂ true = bot active for that contact
+  contactMap: {},     // { "jid": true/false } ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ true = bot active for that contact
   botDelay: 3,        // seconds before replying
   msgMode: 'all',     // 'all' | 'contacts' (only those in contactMap)
   useEmojis: true,
   partesCount: 3,
+  testWhitelist: []
 };
 
 // --- Conversation history (in-memory, persists until restart) ---
@@ -72,6 +73,7 @@ async function loadConfigFromSupabase() {
       aiConfig.msgMode = data.msg_mode || 'all';
       aiConfig.useEmojis = data.use_emojis ?? true;
       aiConfig.partesCount = data.partes_count ?? 3;
+    aiConfig.testWhitelist = data.test_whitelist ?? [];
     }
     console.log('Config cargada desde Supabase. Contacts:', Object.keys(aiConfig.contactMap).length);
   } catch (err) {
@@ -95,6 +97,8 @@ async function saveConfigToSupabase() {
         bot_delay: aiConfig.botDelay,
         msg_mode: aiConfig.msgMode,
         use_emojis: aiConfig.useEmojis,
+        partes_count: aiConfig.partesCount,
+        test_whitelist: aiConfig.testWhitelist,
         updated_at: new Date().toISOString(),
       }, { onConflict: 'id' });
     if (error) throw error;
@@ -119,6 +123,7 @@ function setConfig(updates) {
   if (updates.msgMode !== undefined) aiConfig.msgMode = updates.msgMode;
   if (updates.useEmojis !== undefined) aiConfig.useEmojis = updates.useEmojis;
   if (updates.partesCount !== undefined) aiConfig.partesCount = updates.partesCount;
+    if (updates.testWhitelist !== undefined) aiConfig.testWhitelist = updates.testWhitelist;
   // Persist to Supabase asynchronously
   saveConfigToSupabase().catch(() => {});
 }
@@ -131,6 +136,12 @@ function getUsageStats() {
 async function handleIncomingMessage(chatJid, messageText, pushName, messageId) {
   // --- Guard checks ---
   if (!aiConfig.enabled) return;
+
+  // Test whitelist: if set, only respond to these numbers
+  if (aiConfig.testWhitelist && aiConfig.testWhitelist.length > 0) {
+    const phoneNumber = chatJid.split('@')[0];
+    if (!aiConfig.testWhitelist.includes(phoneNumber)) return;
+  }
   if (!messageText || messageText.trim().length === 0) return;
   if (!sock) return;
 
