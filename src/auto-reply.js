@@ -1,7 +1,15 @@
 /**
- * SANATE Auto-Reply Module
+ * SANATE Auto-Reply Module v3.0
  * AI-powered auto-reply using Gemini (primary), Claude (fallback), OpenAI (fallback)
  * Config persisted in Supabase oasis_wa_config table
+ *
+ * v3.0 Changes:
+ * - Context-dependent partes (smart splitting based on content type)
+ * - Fixed duplicate responses when user sends rapid messages
+ * - Better debouncing (5s) with reply lock per chat
+ * - Improved system prompt with sales strategy
+ * - Better message splitting (no breaking prices/numbers)
+ * - Higher maxOutputTokens for detailed product explanations
  */
 
 let supabaseClient = null;
@@ -14,25 +22,25 @@ let aiConfig = {
   claudeKey: '',
   openaiKey: '',
   systemPrompt: '',
-  contactMap: {},     // { "jid": true/false } ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ true = bot active for that contact
-  botDelay: 3,        // seconds before replying
-  msgMode: 'all',     // 'all' | 'contacts' (only those in contactMap)
+  contactMap: {},
+  botDelay: 3,
+  msgMode: 'all',
   useEmojis: true,
   partesCount: 3,
   testWhitelist: []
 };
 
 // --- Conversation history (in-memory, persists until restart) ---
-// Map<chatJid, Array<{ role: 'user'|'model', text: string, ts: number }>>
 const chatHistory = new Map();
-const MAX_HISTORY = 20; // keep last 20 messages per chat
+const MAX_HISTORY = 20;
 
 // --- Dedup & throttle ---
-const replyTimers = new Map();       // debounce timers per chat
-const lastReplyTime = new Map();     // last reply timestamp per chat
-const processedReplies = new Set();  // message IDs we already replied to
-const DEBOUNCE_MS = 3000;
-const MIN_REPLY_INTERVAL = 5000;     // min 5s between replies to same chat
+const replyTimers = new Map();
+const replyLocks = new Map();
+const lastReplyTime = new Map();
+const processedReplies = new Set();
+const DEBOUNCE_MS = 5000;
+const MIN_REPLY_INTERVAL = 5000;
 const MAX_PROCESSED = 2000;
 
 // --- Usage stats ---
@@ -44,7 +52,7 @@ async function initAutoReply(supabase, socket) {
   supabaseClient = supabase;
   sock = socket;
   await loadConfigFromSupabase();
-  console.log('Auto-reply inicializado. Enabled:', aiConfig.enabled, '| Prompt length:', (aiConfig.systemPrompt || '').length);
+  console.log('Auto-reply v3.0 inicializado. Enabled:', aiConfig.enabled, '| Prompt length:', (aiConfig.systemPrompt || '').length);
 }
 
 function updateSocket(socket) {
@@ -73,7 +81,7 @@ async function loadConfigFromSupabase() {
       aiConfig.msgMode = data.msg_mode || 'all';
       aiConfig.useEmojis = data.use_emojis ?? true;
       aiConfig.partesCount = data.partes_count ?? 3;
-    aiConfig.testWhitelist = data.test_whitelist ?? [];
+      aiConfig.testWhitelist = data.test_whitelist ?? [];
     }
     console.log('Config cargada desde Supabase. Contacts:', Object.keys(aiConfig.contactMap).length);
   } catch (err) {
@@ -123,21 +131,19 @@ function setConfig(updates) {
   if (updates.msgMode !== undefined) aiConfig.msgMode = updates.msgMode;
   if (updates.useEmojis !== undefined) aiConfig.useEmojis = updates.useEmojis;
   if (updates.partesCount !== undefined) aiConfig.partesCount = updates.partesCount;
-    if (updates.testWhitelist !== undefined) aiConfig.testWhitelist = updates.testWhitelist;
-  // Persist to Supabase asynchronously
+  if (updates.testWhitelist !== undefined) aiConfig.testWhitelist = updates.testWhitelist;
   saveConfigToSupabase().catch(() => {});
 }
 
 function getUsageStats() {
   return { ...usageStats, configLoaded: !!aiConfig.systemPrompt, enabled: aiConfig.enabled };
 }
+
 // ===================== MESSAGE HANDLER =====================
 
 async function handleIncomingMessage(chatJid, messageText, pushName, messageId) {
-  // --- Guard checks ---
   if (!aiConfig.enabled) return;
 
-  // Test whitelist: if set, only respond to these numbers
   if (aiConfig.testWhitelist && aiConfig.testWhitelist.length > 0) {
     const phoneNumber = chatJid.split('@')[0];
     if (!aiConfig.testWhitelist.includes(phoneNumber)) return;
@@ -145,14 +151,11 @@ async function handleIncomingMessage(chatJid, messageText, pushName, messageId) 
   if (!messageText || messageText.trim().length === 0) return;
   if (!sock) return;
 
-  // Check if bot should reply to this contact
   if (aiConfig.msgMode === 'contacts') {
     if (!aiConfig.contactMap[chatJid]) return;
   }
-  // Even in 'all' mode, check if contact is explicitly disabled
   if (aiConfig.contactMap[chatJid] === false) return;
 
-  // Dedup: don't reply to same message twice
   if (processedReplies.has(messageId)) return;
   processedReplies.add(messageId);
   if (processedReplies.size > MAX_PROCESSED) {
@@ -160,76 +163,89 @@ async function handleIncomingMessage(chatJid, messageText, pushName, messageId) 
     processedReplies.delete(first);
   }
 
-  // Add to conversation history
   addToHistory(chatJid, 'user', messageText);
 
-  // Debounce: wait for user to finish typing (reset timer on each message)
   if (replyTimers.has(chatJid)) {
     clearTimeout(replyTimers.get(chatJid));
   }
 
   const delay = (aiConfig.botDelay || 3) * 1000;
+  const debounceDelay = Math.max(delay, DEBOUNCE_MS);
+
   replyTimers.set(chatJid, setTimeout(async () => {
     replyTimers.delete(chatJid);
     await processReply(chatJid, pushName);
-  }, delay));
+  }, debounceDelay));
 }
 
 // ===================== PROCESS REPLY =====================
 
 async function processReply(chatJid, pushName) {
-  // Throttle: don't reply too fast to same chat
+  if (replyLocks.get(chatJid)) {
+    console.log('Reply locked for', chatJid, '- skipping');
+    return;
+  }
+  replyLocks.set(chatJid, true);
+
   const now = Date.now();
   const lastTime = lastReplyTime.get(chatJid) || 0;
   if (now - lastTime < MIN_REPLY_INTERVAL) {
     console.log('Throttled reply to', chatJid);
+    replyLocks.delete(chatJid);
     return;
   }
 
   try {
-    // Build system prompt with rules
     let systemPrompt = aiConfig.systemPrompt || 'Eres un asistente de ventas amable para Sanate, tienda de cosmeticos naturales.';
 
-    // Append critical rules
-    systemPrompt += '\n\nREGLA DE EMOJIS: ' + (aiConfig.useEmojis ? 'Usa MAXIMO 1-2 emojis por mensaje, solo cuando sea natural.' : 'NO uses emojis.');
-    systemPrompt += '\n\nREGLAS DE CONVERSACION (OBLIGATORIO):';
-    systemPrompt += '\n1. Responde en MAXIMO 2-3 oraciones cortas por mensaje. Natural y conversacional.';
-    systemPrompt += '\n2. NUNCA repitas el saludo si ya saludaste. Lee el historial y CONTINUA donde quedo.';
-    systemPrompt += '\n3. Si el cliente ya dijo su nombre, NO vuelvas a decir "Hola [nombre]" otra vez.';
-    systemPrompt += '\n4. Si el cliente pregunta por un producto, responde sobre ESE producto directamente.';
-    systemPrompt += '\n5. NO hagas pregunta de cierre de venta en cada mensaje. Solo hazla cuando el cliente ya mostro interes claro (pidio precio, pregunto como comprar, etc). En conversacion normal, fluye natural.';
-    systemPrompt += '\n6. NUNCA repitas una pregunta que ya hiciste antes en la conversacion. Varia siempre.';
-    systemPrompt += '\n7. Nunca uses listas con vinetas. Habla como en WhatsApp real.';
-    systemPrompt += '\n8. Si no tienes info del producto, di que consultas con el equipo y respondes pronto.';
-    systemPrompt += '\n9. Manten un tono amigable y cercano, sin ser invasivo ni insistente con la venta.';
-    systemPrompt += '\n10. Adapta la LONGITUD de tu respuesta al tipo de pregunta: pregunta simple = respuesta corta, pregunta detallada = respuesta mas completa.';
+    systemPrompt += '\n\nREGLA DE EMOJIS: ' + (aiConfig.useEmojis ? 'Usa MAXIMO 1-2 emojis en TODA tu respuesta, distribuidos naturalmente. NO pongas emoji al final de cada parrafo.' : 'NO uses emojis bajo ninguna circunstancia.');
 
-    // Mode-specific instructions for partes
+    systemPrompt += '\n\n=== REGLAS DE CONVERSACION (OBLIGATORIO) ===';
+    systemPrompt += '\n1. Lee SIEMPRE el historial completo antes de responder. CONTINUA donde quedo la conversacion.';
+    systemPrompt += '\n2. NUNCA repitas el saludo si ya saludaste. Si el cliente vuelve a escribir, retoma el tema directamente.';
+    systemPrompt += '\n3. Si el cliente ya dijo su nombre, NO vuelvas a decir "Hola [nombre]" en cada mensaje.';
+    systemPrompt += '\n4. Si el cliente pregunta por un producto ESPECIFICO, responde sobre ESE producto. No preguntes "que buscas".';
+    systemPrompt += '\n5. VARIA tus expresiones de apertura. PROHIBIDO empezar siempre con "Genial!", "Claro que si!", "Que buena pregunta!". Usa variaciones naturales.';
+    systemPrompt += '\n6. NO hagas pregunta de cierre de venta en CADA mensaje. Solo cuando el cliente muestre interes claro.';
+    systemPrompt += '\n7. NUNCA repitas una pregunta que ya hiciste antes. Lee el historial.';
+    systemPrompt += '\n8. Nunca uses listas con vinetas (*) a menos que estes listando productos/precios.';
+    systemPrompt += '\n9. Si no tienes info del producto, di que consultas con el equipo y respondes pronto.';
+    systemPrompt += '\n10. Adapta la LONGITUD segun la pregunta: pregunta simple = respuesta corta 1-2 oraciones. Pregunta sobre beneficios = respuesta detallada.';
+
     if (aiConfig.msgMode === 'partes') {
       const pc = aiConfig.partesCount || 3;
-      systemPrompt += '\n\nMODO ENVIO POR PARTES (MUY IMPORTANTE):';
-      systemPrompt += '\n- Tu respuesta sera dividida en mensajes separados de WhatsApp.';
-      systemPrompt += '\n- Escribe entre 2 y ' + pc + ' parrafos CORTOS separados por doble salto de linea.';
-      systemPrompt += '\n- VARIA la cantidad segun el contexto: saludo o pregunta simple = 2 parrafos, consulta de producto o duda detallada = ' + pc + ' parrafos.';
-      systemPrompt += '\n- Cada parrafo debe ser 1-2 oraciones maximo, como un mensaje de WhatsApp real.';
-      systemPrompt += '\n- Usa 1-2 emojis por parrafo, contextuales (naturaleza/belleza para productos, etc). NO repitas emojis.';
-      systemPrompt += '\n- Formato: "Parrafo1\n\nParrafo2" (minimo 2, maximo ' + pc + ' parrafos).';
+      systemPrompt += '\n\n=== MODO PARTES (INTELIGENTE) ===';
+      systemPrompt += '\nTu respuesta se enviara como mensajes separados de WhatsApp.';
+      systemPrompt += '\nIMPORTANTE: La cantidad de partes depende del CONTEXTO:';
+      systemPrompt += '\n- Saludo, "si", "ok", "gracias", respuestas cortas -> 1 solo parrafo (NO dividir)';
+      systemPrompt += '\n- Pregunta simple de precio o confirmacion -> 1-2 parrafos maximo';
+      systemPrompt += '\n- Explicacion de beneficios, modo de uso, recomendacion detallada -> hasta ' + pc + ' parrafos';
+      systemPrompt += '\n- Formulario de datos de envio -> 1 solo parrafo con toda la info';
+      systemPrompt += '\nFormato: separa parrafos con DOBLE salto de linea.';
+      systemPrompt += '\nCada parrafo debe tener 1-3 oraciones como un mensaje de WhatsApp real.';
+      systemPrompt += '\nNUNCA envies un emoji solo como parrafo separado.';
+      systemPrompt += '\nNUNCA cortes numeros/precios entre parrafos.';
     } else {
-      // Modo completo: maximo 1-2 emojis en todo el mensaje
       systemPrompt += '\n\nUSO DE EMOJIS (modo completo):';
-      systemPrompt += '\n- Usa MAXIMO 1 a 2 emojis en TODA tu respuesta, bien elegidos segun el contexto.';
-      systemPrompt += '\n- Elige emojis que encajen con el tema: naturaleza para productos naturales, caritas para saludos, etc.';
+      systemPrompt += '\n- Usa MAXIMO 1-2 emojis en TODA tu respuesta.';
       systemPrompt += '\n- Si el mensaje es corto o formal, puedes no usar ninguno.';
     }
 
+    systemPrompt += '\n\n=== ESTRATEGIA DE VENTA CONSULTIVA ===';
+    systemPrompt += '\n- FASE 1 (mensajes 1-3): Descubrir necesidad real. Hacer preguntas que revelen el problema/deseo del cliente.';
+    systemPrompt += '\n- FASE 2 (mensajes 4-6): Presentar solucion personalizada con beneficios especificos para SU caso.';
+    systemPrompt += '\n- FASE 3 (mensaje 7+): Resolver objeciones + ofrecer cierre SUAVE con alternativas.';
+    systemPrompt += '\n- Usa la TECNICA ESPEJO: repite las palabras del cliente para validar.';
+    systemPrompt += '\n- CIERRE POR ALTERNATIVA: "Te gustaria el individual o el combo con mas ahorro?" (no ultimatums).';
+    systemPrompt += '\n- Si el cliente dice "si" o muestra interes, pasa DIRECTO a pedir datos de envio. No sigas vendiendo.';
+    systemPrompt += '\n- Si el cliente pregunta precios de mas unidades, CALCULA el precio real. Si no lo sabes, di que consultas.';
+
     if (pushName) {
-      systemPrompt += '\n\nEl nombre del cliente es: ' + pushName;
+      systemPrompt += '\n\nEl nombre del cliente es: ' + pushName + '. Usalo con moderacion (no en cada mensaje).';
     }
 
-    // Get conversation history for context
     const history = await getHistory(chatJid);
 
-    // Call AI (Gemini primary, Claude fallback, OpenAI fallback)
     let reply = null;
     if (aiConfig.geminiKey) {
       reply = await callGemini(systemPrompt, history);
@@ -247,69 +263,80 @@ async function processReply(chatJid, pushName) {
     if (!reply) {
       console.error('No AI provider returned a reply for', chatJid);
       usageStats.errors++;
+      replyLocks.delete(chatJid);
       return;
     }
 
-    // Clean up reply
     reply = cleanReply(reply);
 
-    // Send the reply
-    // Send the reply (single or in parts)
-    if (aiConfig.msgMode === 'partes' && reply.length > 80) {
-      const parts = splitIntoParts(reply, aiConfig.partesCount || 3);
-      for (let i = 0; i < parts.length; i++) {
-        await sock.sendMessage(chatJid, { text: parts[i].trim() });
-        if (i < parts.length - 1) {
-          await new Promise(r => setTimeout(r, 1500 + Math.floor(Math.random() * 1500)));
+    if (aiConfig.msgMode === 'partes') {
+      const parts = smartSplit(reply, aiConfig.partesCount || 3);
+
+      if (parts.length === 1) {
+        await sock.sendMessage(chatJid, { text: parts[0].trim() });
+        console.log('BOT [1 msg] -> ' + chatJid.split('@')[0] + ': ' + parts[0].substring(0, 60));
+      } else {
+        for (let i = 0; i < parts.length; i++) {
+          const partText = parts[i].trim();
+          if (partText.length === 0) continue;
+          await sock.sendMessage(chatJid, { text: partText });
+          if (i < parts.length - 1) {
+            const typingDelay = Math.min(3000, 800 + partText.length * 15);
+            await new Promise(r => setTimeout(r, typingDelay));
+          }
         }
+        console.log('BOT [' + parts.length + ' partes] -> ' + chatJid.split('@')[0]);
       }
-      console.log('BOT [partes] -> ' + chatJid.split('@')[0] + ': ' + parts.length + ' msgs');
     } else {
       await sock.sendMessage(chatJid, { text: reply });
+      console.log('BOT -> ' + chatJid.split('@')[0] + ': ' + reply.substring(0, 80));
     }
+
     lastReplyTime.set(chatJid, Date.now());
     usageStats.totalReplies++;
     usageStats.lastReply = new Date().toISOString();
 
-    // Add bot reply to history
     addToHistory(chatJid, 'model', reply);
 
-    // Save to Supabase
-    const { saveMessage, upsertChat } = require('./supabase');
     if (aiConfig.msgMode !== 'partes') {
-    await saveMessage(chatJid, 'Sanate Bot', {
-      messageId: 'bot_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6),
-      text: reply,
-      type: 'text',
-      fromMe: true,
-      timestamp: Math.floor(Date.now() / 1000),
-    });
+      const { saveMessage, upsertChat } = require('./supabase');
+      await saveMessage(chatJid, 'Sanate Bot', {
+        messageId: 'bot_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6),
+        text: reply,
+        type: 'text',
+        fromMe: true,
+        timestamp: Math.floor(Date.now() / 1000),
+      });
+      await upsertChat(chatJid, null, reply, Math.floor(Date.now() / 1000));
     }
-    await upsertChat(chatJid, null, reply, Math.floor(Date.now() / 1000));
-
-    console.log('BOT -> ' + chatJid.split('@')[0] + ': ' + reply.substring(0, 80));
 
   } catch (err) {
     console.error('Error en processReply:', err.message);
     usageStats.errors++;
+  } finally {
+    replyLocks.delete(chatJid);
   }
-    }
+}
+
 // ===================== CONVERSATION HISTORY =====================
 
 function addToHistory(chatJid, role, text) {
   if (!chatHistory.has(chatJid)) chatHistory.set(chatJid, []);
   const hist = chatHistory.get(chatJid);
   hist.push({ role, text, ts: Date.now() });
-  // Keep only last MAX_HISTORY messages
   if (hist.length > MAX_HISTORY) hist.splice(0, hist.length - MAX_HISTORY);
 }
 
 async function getHistory(chatJid) {
-  // If history exists in memory, return it
   if (chatHistory.has(chatJid) && chatHistory.get(chatJid).length > 0) {
-    return chatHistory.get(chatJid);
+    const hist = chatHistory.get(chatJid);
+    const lastTs = hist[hist.length - 1]?.ts || 0;
+    if (Date.now() - lastTs < 30 * 60 * 1000) {
+      return hist;
+    }
+    console.log('[history] Stale history for', chatJid, '- reloading from Supabase');
   }
-  // Cold start: load last messages from Supabase
+
   if (supabaseClient) {
     try {
       const { data } = await supabaseClient
@@ -320,7 +347,7 @@ async function getHistory(chatJid) {
         .limit(MAX_HISTORY);
       if (data && data.length > 0) {
         const hist = data.reverse().map(m => ({
-          role: m.direction === 'out' ? 'model' : 'user',
+          role: m.direction === 's' ? 'model' : 'user',
           text: m.content || '',
           ts: new Date(m.timestamp).getTime()
         })).filter(m => m.text.length > 0);
@@ -339,9 +366,8 @@ async function getHistory(chatJid) {
 
 async function callGemini(systemPrompt, history) {
   try {
-    const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=' + aiConfig.geminiKey;
+    const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=' + aiConfig.geminiKey;
 
-    // Build Gemini conversation format
     const contents = [];
     for (const msg of history) {
       contents.push({
@@ -350,7 +376,6 @@ async function callGemini(systemPrompt, history) {
       });
     }
 
-    // If no messages or last message is not from user, skip
     if (contents.length === 0 || contents[contents.length - 1].role !== 'user') return null;
 
     const body = {
@@ -358,7 +383,7 @@ async function callGemini(systemPrompt, history) {
       contents: contents,
       generationConfig: {
         temperature: 0.7,
-        maxOutputTokens: 300,
+        maxOutputTokens: 600,
         topP: 0.9,
       }
     };
@@ -398,11 +423,11 @@ async function callClaude(systemPrompt, history) {
       headers: {
         'Content-Type': 'application/json',
         'x-api-key': aiConfig.claudeKey,
-        'anthropic-version': '2023-06-01',
+        'anthropic-version': '2023-06-01'
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-20250514',
-        max_tokens: 300,
+        max_tokens: 600,
         system: systemPrompt,
         messages: messages,
       }),
@@ -443,7 +468,7 @@ async function callOpenAI(systemPrompt, history) {
       body: JSON.stringify({
         model: 'gpt-4o-mini',
         messages: messages,
-        max_tokens: 300,
+        max_tokens: 600,
         temperature: 0.7,
       }),
     });
@@ -462,43 +487,113 @@ async function callOpenAI(systemPrompt, history) {
   }
 }
 
-// ===================== UTILS =====================
+// ===================== SMART SPLIT (Context-Dependent Partes) =====================
 
-
-// ===================== SPLIT INTO PARTS (msgMode partes) =====================
-function splitIntoParts(text, maxParts) {
+function smartSplit(text, maxParts) {
   maxParts = maxParts || 3;
-  if (!text || text.length < 80) return [text];
-  
-  // Try splitting by double newline first
+  if (!text) return [text];
+
+  if (text.length < 100) return [text];
+
+  const isShortReply = text.length < 150;
+  const hasProductList = /\$[\d.,]+/.test(text) && (/combo|opci[oó]n|precio/i.test(text));
+  const hasBenefits = /(beneficio|sirve para|ayuda a|mejora|reduce|promueve)/i.test(text);
+  const hasFormData = /(nombre|direcci[oó]n|ciudad|m[eé]todo de pago|nequi|bancolombia)/i.test(text);
+  const isGreeting = /^[¡!]?(hola|hey|buenos|buenas)/i.test(text.trim());
+
+  let targetParts;
+  if (isGreeting || isShortReply) {
+    targetParts = 1;
+  } else if (hasFormData) {
+    targetParts = 1;
+  } else if (hasProductList) {
+    targetParts = Math.min(2, maxParts);
+  } else if (hasBenefits) {
+    targetParts = maxParts;
+  } else {
+    const naturalParts = text.split(/\n\n+/).filter(p => p.trim().length > 0);
+    targetParts = Math.min(naturalParts.length, maxParts);
+    if (targetParts <= 1) targetParts = text.length > 250 ? 2 : 1;
+  }
+
+  if (targetParts <= 1) return [text];
+
   let parts = text.split(/\n\n+/).filter(p => p.trim().length > 0);
-  if (parts.length >= 2 && parts.length <= maxParts) return parts.slice(0, maxParts);
-  
-  // Try splitting by sentence endings (. ? !)
+
+  if (parts.length >= 2 && parts.length <= targetParts) {
+    parts = mergeShortParts(parts);
+    return parts.slice(0, targetParts);
+  }
+
+  if (parts.length > targetParts) {
+    return mergeParts(parts, targetParts);
+  }
+
   const sentences = text.match(/[^.!?]+[.!?]+/g) || [text];
   if (sentences.length <= 1) return [text];
-  
-  // Group sentences into targetParts (based on maxParts)
-  const targetParts = Math.min(maxParts, Math.max(2, sentences.length));
+
   const perPart = Math.ceil(sentences.length / targetParts);
   parts = [];
   for (let i = 0; i < sentences.length; i += perPart) {
     const chunk = sentences.slice(i, i + perPart).join('').trim();
     if (chunk) parts.push(chunk);
   }
-  return parts.slice(0, maxParts);
+
+  parts = fixBrokenPrices(parts);
+  parts = mergeShortParts(parts);
+
+  return parts.slice(0, targetParts);
+}
+
+function mergeShortParts(parts) {
+  if (parts.length <= 1) return parts;
+  const merged = [];
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i].trim();
+    if (p.length < 15) {
+      if (merged.length > 0) {
+        merged[merged.length - 1] += ' ' + p;
+      } else if (i + 1 < parts.length) {
+        parts[i + 1] = p + ' ' + parts[i + 1];
+      } else {
+        merged.push(p);
+      }
+    } else {
+      merged.push(p);
+    }
+  }
+  return merged;
+}
+
+function mergeParts(parts, targetCount) {
+  if (parts.length <= targetCount) return parts;
+  const result = [];
+  const perGroup = Math.ceil(parts.length / targetCount);
+  for (let i = 0; i < parts.length; i += perGroup) {
+    const group = parts.slice(i, i + perGroup).join('\n\n');
+    result.push(group);
+  }
+  return result;
+}
+
+function fixBrokenPrices(parts) {
+  for (let i = 0; i < parts.length - 1; i++) {
+    if (/\$[\d,.]*$/.test(parts[i].trim()) && /^\d/.test(parts[i + 1].trim())) {
+      parts[i] = parts[i] + parts[i + 1];
+      parts.splice(i + 1, 1);
+      i--;
+    }
+  }
+  return parts;
 }
 
 function cleanReply(text) {
   if (!text) return '';
-  // Remove markdown bold/italic
-  text = text.replace(/\*\*/g, '').replace(/__/g, '');
-  // Remove excessive newlines
+  text = text.replace(/\*\*/g, '*');
+  text = text.replace(/__/g, '');
   text = text.replace(/\n{3,}/g, '\n\n');
-  // Trim
   text = text.trim();
-  // Limit length (WhatsApp friendly)
-  if (text.length > 500) text = text.substring(0, 497) + '...';
+  if (text.length > 800) text = text.substring(0, 797) + '...';
   return text;
 }
 
