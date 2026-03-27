@@ -544,3 +544,13 @@ app.listen(PORT, () => {
   for (const [, dev] of devices) loadContacts(dev);
   connectDevice('default');
 });
+
+// ===================== KEEP-ALIVE SELF-PING =====================
+// Prevents Render free tier from sleeping (pings every 14 min)
+const SELF_URL = process.env.RENDER_EXTERNAL_URL || 'https://sanate-wa-bot.onrender.com';
+setInterval(() => {
+  fetch(SELF_URL)
+    .then(r => console.log('[keep-alive] ping OK', r.status))
+    .catch(e => console.log('[keep-alive] ping error', e.message));
+}, 14 * 60 * 1000);
+console.log('[keep-alive] Self-ping active every 14 min ->', SELF_URL);
