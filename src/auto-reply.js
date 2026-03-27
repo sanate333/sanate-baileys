@@ -212,7 +212,7 @@ async function processReply(chatJid, pushName) {
     }
 
     // Get conversation history for context
-    const history = getHistory(chatJid);
+    const history = await getHistory(chatJid);
 
     // Call AI (Gemini primary, Claude fallback, OpenAI fallback)
     let reply = null;
@@ -289,8 +289,35 @@ function addToHistory(chatJid, role, text) {
   if (hist.length > MAX_HISTORY) hist.splice(0, hist.length - MAX_HISTORY);
 }
 
-function getHistory(chatJid) {
-  return chatHistory.get(chatJid) || [];
+async function getHistory(chatJid) {
+  // If history exists in memory, return it
+  if (chatHistory.has(chatJid) && chatHistory.get(chatJid).length > 0) {
+    return chatHistory.get(chatJid);
+  }
+  // Cold start: load last messages from Supabase
+  if (supabaseClient) {
+    try {
+      const { data } = await supabaseClient
+        .from('oasis_wa_messages')
+        .select('direction, content, timestamp')
+        .eq('chat_jid', chatJid)
+        .order('timestamp', { ascending: false })
+        .limit(MAX_HISTORY);
+      if (data && data.length > 0) {
+        const hist = data.reverse().map(m => ({
+          role: m.direction === 'out' ? 'model' : 'user',
+          text: m.content || '',
+          ts: new Date(m.timestamp).getTime()
+        })).filter(m => m.text.length > 0);
+        chatHistory.set(chatJid, hist);
+        console.log('[history] Loaded', hist.length, 'msgs from Supabase for', chatJid);
+        return hist;
+      }
+    } catch (e) {
+      console.log('[history] Supabase load error:', e.message);
+    }
+  }
+  return [];
 }
 
 // ===================== AI PROVIDERS =====================
