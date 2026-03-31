@@ -205,6 +205,7 @@ router.post('/settings', (req, res) => {
     if (b.botEnabled !== undefined) cfg.enabled = b.botEnabled;
     if (b.openaiKey) cfg.openaiKey = b.openaiKey;
     if (b.systemPrompt) cfg.systemPrompt = b.systemPrompt;
+    if (b.companyContext !== undefined) cfg.companyContext = b.companyContext;
     if (b.aiContactMap) cfg.contactMap = b.aiContactMap;
     if (b.msgMode) cfg.msgMode = b.msgMode;
     if (b.useEmojis !== undefined) cfg.useEmojis = b.useEmojis;
@@ -233,6 +234,7 @@ router.get('/ai-config', (req, res) => {
     claudeKey: cfg.claudeKey || '',
     openaiKey: cfg.openaiKey || '',
     systemPrompt: cfg.systemPrompt || '',
+      companyContext: cfg.companyContext || '',
     contactMap: cfg.contactMap || {},
     botDelay: cfg.botDelay,
     msgMode: cfg.msgMode,
