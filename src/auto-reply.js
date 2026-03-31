@@ -28,6 +28,7 @@ let aiConfig = {
   useEmojis: true,
   partesCount: 3,
   testWhitelist: []
+  companyContext: '',
 };
 
 // --- Conversation history (in-memory, persists until restart) ---
@@ -76,6 +77,7 @@ async function loadConfigFromSupabase() {
       aiConfig.claudeKey = data.claude_key || '';
       aiConfig.openaiKey = data.openai_key || '';
       aiConfig.systemPrompt = data.system_prompt || '';
+      aiConfig.companyContext = data.company_context || '';
       aiConfig.contactMap = data.contact_map || {};
       aiConfig.botDelay = data.bot_delay ?? 3;
       aiConfig.msgMode = data.msg_mode || 'all';
@@ -101,6 +103,7 @@ async function saveConfigToSupabase() {
         claude_key: aiConfig.claudeKey,
         openai_key: aiConfig.openaiKey,
         system_prompt: aiConfig.systemPrompt,
+        company_context: aiConfig.companyContext,
         contact_map: aiConfig.contactMap,
         bot_delay: aiConfig.botDelay,
         msg_mode: aiConfig.msgMode,
@@ -126,6 +129,7 @@ function setConfig(updates) {
   if (updates.claudeKey !== undefined) aiConfig.claudeKey = updates.claudeKey;
   if (updates.openaiKey !== undefined) aiConfig.openaiKey = updates.openaiKey;
   if (updates.systemPrompt !== undefined) aiConfig.systemPrompt = updates.systemPrompt;
+  if (updates.companyContext !== undefined) aiConfig.companyContext = updates.companyContext;
   if (updates.contactMap !== undefined) aiConfig.contactMap = updates.contactMap;
   if (updates.botDelay !== undefined) aiConfig.botDelay = updates.botDelay;
   if (updates.msgMode !== undefined) aiConfig.msgMode = updates.msgMode;
@@ -245,6 +249,10 @@ async function processReply(chatJid, pushName) {
     }
 
     const history = await getHistory(chatJid);
+
+        if (aiConfig.companyContext) {
+      systemPrompt += '\n\n[CONTEXTO DEL NEGOCIO]\n' + aiConfig.companyContext;
+    }
 
     let reply = null;
     if (aiConfig.geminiKey) {
@@ -496,10 +504,10 @@ function smartSplit(text, maxParts) {
   if (text.length < 100) return [text];
 
   const isShortReply = text.length < 150;
-  const hasProductList = /\$[\d.,]+/.test(text) && (/combo|opci[oó]n|precio/i.test(text));
+  const hasProductList = /\$[\d.,]+/.test(text) && (/combo|opci[oÃ³]n|precio/i.test(text));
   const hasBenefits = /(beneficio|sirve para|ayuda a|mejora|reduce|promueve)/i.test(text);
-  const hasFormData = /(nombre|direcci[oó]n|ciudad|m[eé]todo de pago|nequi|bancolombia)/i.test(text);
-  const isGreeting = /^[¡!]?(hola|hey|buenos|buenas)/i.test(text.trim());
+  const hasFormData = /(nombre|direcci[oÃ³]n|ciudad|m[eÃ©]todo de pago|nequi|bancolombia)/i.test(text);
+  const isGreeting = /^[Â¡!]?(hola|hey|buenos|buenas)/i.test(text.trim());
 
   let targetParts;
   if (isGreeting || isShortReply) {
