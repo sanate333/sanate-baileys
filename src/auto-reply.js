@@ -27,7 +27,7 @@ let aiConfig = {
   msgMode: 'all',
   useEmojis: true,
   partesCount: 3,
-  testWhitelist: []
+  testWhitelist: [],
   companyContext: '',
 };
 
