@@ -29,6 +29,7 @@ let aiConfig = {
   partesCount: 3,
   testWhitelist: [],
   companyContext: '',
+  comportamiento: '',
 };
 
 // --- Conversation history (in-memory, persists until restart) ---
@@ -84,6 +85,7 @@ async function loadConfigFromSupabase() {
       aiConfig.useEmojis = data.use_emojis ?? true;
       aiConfig.partesCount = data.partes_count ?? 3;
       aiConfig.testWhitelist = data.test_whitelist ?? [];
+        aiConfig.comportamiento = data.comportamiento || '';
     }
     console.log('Config cargada desde Supabase. Contacts:', Object.keys(aiConfig.contactMap).length);
   } catch (err) {
@@ -110,6 +112,7 @@ async function saveConfigToSupabase() {
         use_emojis: aiConfig.useEmojis,
         partes_count: aiConfig.partesCount,
         test_whitelist: aiConfig.testWhitelist,
+        comportamiento: aiConfig.comportamiento,
         updated_at: new Date().toISOString(),
       }, { onConflict: 'id' });
     if (error) throw error;
@@ -136,11 +139,13 @@ function setConfig(updates) {
   if (updates.useEmojis !== undefined) aiConfig.useEmojis = updates.useEmojis;
   if (updates.partesCount !== undefined) aiConfig.partesCount = updates.partesCount;
   if (updates.testWhitelist !== undefined) aiConfig.testWhitelist = updates.testWhitelist;
+  if (updates.comportamiento !== undefined) aiConfig.comportamiento = updates.comportamiento;
   saveConfigToSupabase().catch(() => {});
 }
 
 function getUsageStats() {
-  return { ...usageStats, configLoaded: !!aiConfig.systemPrompt, enabled: aiConfig.enabled };
+  const today = new Date().toISOString().slice(0,10);
+  return { ...usageStats, configLoaded: !!aiConfig.systemPrompt, enabled: aiConfig.enabled, dailyCount: usageStats.dailyDate === today ? usageStats.dailyCount : 0, dailyDate: today, dailyLimit: 250 };
 }
 
 // ===================== MESSAGE HANDLER =====================
@@ -202,7 +207,10 @@ async function processReply(chatJid, pushName) {
   try {
     let systemPrompt = aiConfig.systemPrompt || 'Eres un asistente de ventas amable para Sanate, tienda de cosmeticos naturales.';
 
-    systemPrompt += '\n\nREGLA DE EMOJIS: ' + (aiConfig.useEmojis ? 'Usa MAXIMO 1-2 emojis en TODA tu respuesta, distribuidos naturalmente. NO pongas emoji al final de cada parrafo.' : 'NO uses emojis bajo ninguna circunstancia.');
+    if (aiConfig.comportamiento) {
+    systemPrompt += '\n\n=== COMPORTAMIENTO PERSONALIZADO ===\n' + aiConfig.comportamiento;
+  }
+  systemPrompt += '\n\nREGLA DE EMOJIS: ' + (aiConfig.useEmojis ? 'Usa MAXIMO 1-2 emojis en TODA tu respuesta, distribuidos naturalmente. NO pongas emoji al final de cada parrafo.' : 'NO uses emojis bajo ninguna circunstancia.');
 
     systemPrompt += '\n\n=== REGLAS DE CONVERSACION (OBLIGATORIO) ===';
     systemPrompt += '\n1. Lee SIEMPRE el historial completo antes de responder. CONTINUA donde quedo la conversacion.';
@@ -302,6 +310,10 @@ async function processReply(chatJid, pushName) {
 
     lastReplyTime.set(chatJid, Date.now());
     usageStats.totalReplies++;
+    // Daily counter
+    const todayDate = new Date().toISOString().slice(0,10);
+    if (usageStats.dailyDate !== todayDate) { usageStats.dailyCount = 0; usageStats.dailyDate = todayDate; }
+    usageStats.dailyCount++;
     usageStats.lastReply = new Date().toISOString();
 
     addToHistory(chatJid, 'model', reply);
@@ -601,7 +613,7 @@ function cleanReply(text) {
   text = text.replace(/__/g, '');
   text = text.replace(/\n{3,}/g, '\n\n');
   text = text.trim();
-  if (text.length > 800) text = text.substring(0, 797) + '...';
+  if (text.length > 3000) text = text.substring(0, 2997) + '...';
   return text;
 }
 
