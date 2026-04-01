@@ -435,7 +435,7 @@ async function callClaude(systemPrompt, history) {
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-20250514',
-        maxOutputTokens: 2000,
+        
         system: systemPrompt,
         messages: messages,
       }),
@@ -476,7 +476,7 @@ async function callOpenAI(systemPrompt, history) {
       body: JSON.stringify({
         model: 'gpt-4o-mini',
         messages: messages,
-        maxOutputTokens: 2000,
+        
         temperature: 0.7,
       }),
     });
