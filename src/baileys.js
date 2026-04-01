@@ -141,6 +141,27 @@ async function connectToWhatsApp() {
   sock.ev.on('presence.update', (update) => {
     if (sseManager) sseManager.broadcast({ type: 'presence', data: update });
   });
+
+  // Track message delivery/read status
+  sock.ev.on('messages.update', (updates) => {
+    for (const { key, update } of updates) {
+      if (update.status !== undefined) {
+        const statusMap = { 0: 'error', 1: 'pending', 2: 'sent', 3: 'delivered', 4: 'read', 5: 'played' };
+        const statusName = statusMap[update.status] || 'unknown';
+        console.log('MSG STATUS:', key.remoteJid?.split('@')[0], key.id?.substring(0,8), '->', statusName);
+        if (sseManager) sseManager.broadcast({
+          type: 'message_status',
+          data: {
+            chatId: key.remoteJid,
+            messageId: key.id,
+            fromMe: key.fromMe || false,
+            status: update.status,
+            statusName: statusName
+          }
+        });
+      }
+    }
+  });
 }
 async function runInitialSync() {
   if (initialSyncDone) return;
