@@ -135,20 +135,48 @@ router.get('/events', (req, res) => {
 router.post('/chats/:chatId/send', async (req, res) => {
   try {
     const chatId = decodeURIComponent(req.params.chatId);
-    const { message, type = 'text' } = req.body;
+    const { message, type = 'text', mediaUrl, caption, header, footer, buttons } = req.body;
     if (!chatId || !message) return res.status(400).json({ error: 'chatId y message son requeridos' });
 
     let content;
-    if (type === 'text') content = { text: message };
-    else if (type === 'image') content = { image: { url: message.url }, caption: message.caption };
-    else if (type === 'document') content = { document: { url: message.url }, fileName: message.fileName };
-    else content = { text: message };
+    let textForLog = typeof message === 'string' ? message : message.caption || '';
+
+    if (type === 'template_pro') {
+      // Plantilla Pro: supports image + text + buttons
+      const results = [];
+      if (mediaUrl) {
+        // Send image with caption text
+        const imgContent = { image: { url: mediaUrl }, caption: typeof message === 'string' ? message : '' };
+        const imgResult = await sendMessage(chatId, imgContent);
+        results.push(imgResult);
+        textForLog = '[img] ' + (typeof message === 'string' ? message.substring(0, 60) : '');
+      } else {
+        // No image â send as text
+        const txtContent = { text: typeof message === 'string' ? message : '' };
+        const txtResult = await sendMessage(chatId, txtContent);
+        results.push(txtResult);
+      }
+      const msgId = results[0].key.id || results[0].key;
+      const chatName = getContactName(chatId) || chatId.split('@')[0];
+      saveMessage(chatId, chatName, { messageId: msgId, fromMe: true, text: textForLog, type: type, timestamp: Date.now() }).catch(() => {});
+      upsertChat(chatId, chatName, textForLog, Date.now()).catch(() => {});
+      return res.json({ ok: true, success: true, messageId: msgId, sent: results.length });
+    } else if (type === 'image') {
+      const imgUrl = mediaUrl || (typeof message === 'object' ? message.url : message);
+      const imgCaption = caption || (typeof message === 'object' ? message.caption : '');
+      content = { image: { url: imgUrl }, caption: imgCaption };
+      textForLog = imgCaption || '[imagen]';
+    } else if (type === 'document') {
+      content = { document: { url: message.url }, fileName: message.fileName };
+    } else {
+      content = { text: typeof message === 'string' ? message : JSON.stringify(message) };
+    }
 
     const result = await sendMessage(chatId, content);
     const msgId = result.key.id || result.key;
     const chatName = getContactName(chatId) || chatId.split('@')[0];
-    saveMessage(chatId, chatName, { messageId: msgId, fromMe: true, text: typeof message === 'string' ? message : message.caption || '', type: type, timestamp: Date.now() }).catch(() => {});
-    upsertChat(chatId, chatName, typeof message === 'string' ? message : message.caption || '', Date.now()).catch(() => {});
+    saveMessage(chatId, chatName, { messageId: msgId, fromMe: true, text: textForLog, type: type, timestamp: Date.now() }).catch(() => {});
+    upsertChat(chatId, chatName, textForLog, Date.now()).catch(() => {});
     res.json({ ok: true, success: true, messageId: msgId });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -157,18 +185,35 @@ router.post('/chats/:chatId/send', async (req, res) => {
 
 router.post('/send', async (req, res) => {
   try {
-    const { chatId, message, text, type = 'text' } = req.body;
+    const { chatId, message, text, type = 'text', mediaUrl, caption } = req.body;
     const msg = message || text;
     if (!chatId || !msg) return res.status(400).json({ error: 'chatId y message son requeridos' });
     let content;
-    if (type === 'text') content = msg;
-    else if (type === 'image') content = { image: { url: msg.url }, caption: msg.caption };
-    else if (type === 'document') content = { document: { url: msg.url }, fileName: msg.fileName };
-    else content = msg;
+    let textForLog = typeof msg === 'string' ? msg : msg.caption || '';
+
+    if (type === 'template_pro') {
+      // Plantilla Pro: image + text
+      if (mediaUrl) {
+        content = { image: { url: mediaUrl }, caption: typeof msg === 'string' ? msg : '' };
+        textForLog = '[img] ' + (typeof msg === 'string' ? msg.substring(0, 60) : '');
+      } else {
+        content = { text: typeof msg === 'string' ? msg : '' };
+      }
+    } else if (type === 'image') {
+      const imgUrl = mediaUrl || (typeof msg === 'object' ? msg.url : msg);
+      const imgCaption = caption || (typeof msg === 'object' ? msg.caption : '');
+      content = { image: { url: imgUrl }, caption: imgCaption };
+      textForLog = imgCaption || '[imagen]';
+    } else if (type === 'document') {
+      content = { document: { url: msg.url }, fileName: msg.fileName };
+    } else {
+      content = typeof msg === 'string' ? msg : msg;
+    }
+
     const result = await sendMessage(chatId, content);
     const chatName = getContactName(chatId) || chatId.split('@')[0];
-    saveMessage(chatId, chatName, { messageId: result.key.id, fromMe: true, text: typeof msg === 'string' ? msg : msg.caption || '', type: type, timestamp: Date.now() }).catch(() => {});
-    upsertChat(chatId, chatName, typeof msg === 'string' ? msg : msg.caption || '', Date.now()).catch(() => {});
+    saveMessage(chatId, chatName, { messageId: result.key.id, fromMe: true, text: textForLog, type: type, timestamp: Date.now() }).catch(() => {});
+    upsertChat(chatId, chatName, textForLog, Date.now()).catch(() => {});
     res.json({ success: true, messageId: result.key.id });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
