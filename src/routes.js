@@ -217,6 +217,7 @@ router.post('/settings', (req, res) => {
     if (b.contactMap) cfg.contactMap = b.contactMap;
     if (b.partesCount !== undefined) cfg.partesCount = b.partesCount;
     if (b.testWhitelist !== undefined) cfg.testWhitelist = b.testWhitelist;
+    if (b.comportamiento !== undefined) cfg.comportamiento = b.comportamiento;
     setConfig(cfg);
     res.json({ ok: true, settings: 'synced' });
   } catch (err) {
@@ -245,6 +246,9 @@ router.get('/ai-config', (req, res) => {
     hasClaudeKey: !!cfg.claudeKey,
     hasOpenaiKey: !!cfg.openaiKey,
     hasSystemPrompt: !!cfg.systemPrompt,
+    comportamiento: cfg.comportamiento || '',
+    dailyCount: getUsageStats().dailyCount,
+    dailyLimit: 250,
   });
 });
 
