@@ -232,11 +232,13 @@ async function processReply(chatJid, pushName) {
       systemPrompt += '\n- Saludo, "si", "ok", "gracias", respuestas cortas -> 1 solo parrafo (NO dividir)';
       systemPrompt += '\n- Pregunta simple de precio o confirmacion -> 1-2 parrafos maximo';
       systemPrompt += '\n- Explicacion de beneficios, modo de uso, recomendacion detallada -> hasta ' + pc + ' parrafos';
+    systemPrompt += '\n- LISTADO DE OPCIONES/COMBOS/PRODUCTOS -> TODAS las opciones completas (minimo 3), puedes usar MAS parrafos si es necesario para no cortar informacion';
       systemPrompt += '\n- Formulario de datos de envio -> 1 solo parrafo con toda la info';
       systemPrompt += '\nFormato: separa parrafos con DOBLE salto de linea.';
       systemPrompt += '\nCada parrafo debe tener 1-3 oraciones como un mensaje de WhatsApp real.';
       systemPrompt += '\nNUNCA envies un emoji solo como parrafo separado.';
       systemPrompt += '\nNUNCA cortes numeros/precios entre parrafos.';
+    systemPrompt += '\nNUNCA dejes una respuesta incompleta. Si listas opciones, SIEMPRE incluye TODAS (minimo 3 opciones de combos cuando el cliente pregunte por un producto).';
     } else {
       systemPrompt += '\n\nUSO DE EMOJIS (modo completo):';
       systemPrompt += '\n- Usa MAXIMO 1-2 emojis en TODA tu respuesta.';
@@ -403,7 +405,7 @@ async function callGemini(systemPrompt, history) {
       contents: contents,
       generationConfig: {
         temperature: 0.7,
-        maxOutputTokens: 2000,
+        maxOutputTokens: 4000,
         topP: 0.9,
       }
     };
@@ -447,7 +449,7 @@ async function callClaude(systemPrompt, history) {
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-20250514',
-        max_tokens: 2000,
+        max_tokens: 4000,
         system: systemPrompt,
         messages: messages,
       }),
@@ -488,7 +490,7 @@ async function callOpenAI(systemPrompt, history) {
       body: JSON.stringify({
         model: 'gpt-4o-mini',
         messages: messages,
-        max_tokens: 2000,
+        max_tokens: 4000,
         temperature: 0.7,
       }),
     });
@@ -511,6 +513,9 @@ async function callOpenAI(systemPrompt, history) {
 
 function smartSplit(text, maxParts) {
   maxParts = maxParts || 3;
+  // Allow more parts for listings with multiple options
+  const hasMultipleOptions = /[1-3⃣️①②③]|opci[oó]n\s*[1-3]|combo\s*[1-3]/i.test(text);
+  if (hasMultipleOptions) maxParts = Math.max(maxParts, 8);
   if (!text) return [text];
 
   if (text.length < 100) return [text];
@@ -613,7 +618,7 @@ function cleanReply(text) {
   text = text.replace(/__/g, '');
   text = text.replace(/\n{3,}/g, '\n\n');
   text = text.trim();
-  if (text.length > 3000) text = text.substring(0, 2997) + '...';
+  // No truncation - maxOutputTokens already limits response length
   return text;
 }
 
