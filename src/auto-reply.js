@@ -391,7 +391,7 @@ async function callGemini(systemPrompt, history) {
       contents: contents,
       generationConfig: {
         temperature: 0.7,
-        
+        maxOutputTokens: 2000,
         topP: 0.9,
       }
     };
@@ -435,7 +435,7 @@ async function callClaude(systemPrompt, history) {
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-20250514',
-        
+        max_tokens: 2000,
         system: systemPrompt,
         messages: messages,
       }),
@@ -476,7 +476,7 @@ async function callOpenAI(systemPrompt, history) {
       body: JSON.stringify({
         model: 'gpt-4o-mini',
         messages: messages,
-        
+        max_tokens: 2000,
         temperature: 0.7,
       }),
     });
@@ -504,10 +504,10 @@ function smartSplit(text, maxParts) {
   if (text.length < 100) return [text];
 
   const isShortReply = text.length < 150;
-  const hasProductList = /\$[\d.,]+/.test(text) && (/combo|opci[oÃ³]n|precio/i.test(text));
+  const hasProductList = /\$[\d.,]+/.test(text) && (/combo|opci[oÃÂ³]n|precio/i.test(text));
   const hasBenefits = /(beneficio|sirve para|ayuda a|mejora|reduce|promueve)/i.test(text);
-  const hasFormData = /(nombre|direcci[oÃ³]n|ciudad|m[eÃ©]todo de pago|nequi|bancolombia)/i.test(text);
-  const isGreeting = /^[Â¡!]?(hola|hey|buenos|buenas)/i.test(text.trim());
+  const hasFormData = /(nombre|direcci[oÃÂ³]n|ciudad|m[eÃÂ©]todo de pago|nequi|bancolombia)/i.test(text);
+  const isGreeting = /^[ÃÂ¡!]?(hola|hey|buenos|buenas)/i.test(text.trim());
 
   let targetParts;
   if (isGreeting || isShortReply) {
