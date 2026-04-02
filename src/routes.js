@@ -5,6 +5,20 @@ const { getConnectionState, getQR, getProfilePhoto, getContactName, sendMessage,
 const { getChats, getMessages, saveMessage, upsertChat } = require('./supabase');
 const { getConfig, setConfig, getUsageStats } = require('./auto-reply');
 
+// Baileys internals para envio directo de mensajes interactivos (relayMessage)
+let _baileys = null;
+function getBaileysFns() {
+  if (!_baileys) {
+    try {
+      _baileys = require('@whiskeysockets/baileys');
+    } catch (e) {
+      console.error('[Baileys] No se pudo importar baileys internals:', e.message);
+      _baileys = {};
+    }
+  }
+  return _baileys;
+}
+
 // === HELPER: Descargar media como Buffer (mas confiable que pasar URL a Baileys) ===
 async function downloadMediaBuffer(url) {
   const resp = await fetch(url, {
@@ -44,12 +58,88 @@ async function buildMediaPayload(mediaUrl, captionText, options = {}) {
       mediaType: 'document'
     };
   } else {
-    // Imagen (default)
     return {
       payload: { image: buffer, caption: captionText || '', mimetype: contentType || 'image/jpeg' },
       mediaType: 'image'
     };
   }
+}
+
+// === HELPER PRINCIPAL: Enviar mensaje interactivo con proto directo ===
+// Usa generateWAMessageFromContent + relayMessage en lugar de sendMessage
+// para garantizar que los botones lleguen correctamente (nativeFlowMessage)
+async function sendInteractiveMessageDirect(chatId, { buffer, contentType, mediaType, captionText, footerText, nativeButtons }) {
+  const sock = getSocket();
+  if (!sock) throw new Error('Socket de WhatsApp no disponible');
+  if (!sock.relayMessage) throw new Error('sock.relayMessage no disponible');
+
+  const { generateWAMessageFromContent, prepareWAMessageMedia } = getBaileysFns();
+  if (!generateWAMessageFromContent) throw new Error('generateWAMessageFromContent no disponible');
+
+  // Normalizar JID
+  const jid = chatId.includes('@') ? chatId : chatId + '@s.whatsapp.net';
+
+  // Construir header con media subida a los servidores de WhatsApp
+  let header = { hasMediaAttachment: false };
+  if (buffer && prepareWAMessageMedia) {
+    const isVideo = mediaType === 'video';
+    const mediaPayload = isVideo
+      ? { video: buffer, mimetype: contentType || 'video/mp4' }
+      : { image: buffer, mimetype: contentType || 'image/jpeg' };
+
+    const uploaded = await prepareWAMessageMedia(mediaPayload, { upload: sock.waUploadToServer });
+
+    header = {
+      ...(isVideo
+        ? { videoMessage: uploaded.videoMessage }
+        : { imageMessage: uploaded.imageMessage }),
+      hasMediaAttachment: true
+    };
+  }
+
+  // Construir interactiveMessage con nativeFlowMessage (botones reales)
+  const msgContent = {
+    interactiveMessage: {
+      header,
+      body: { text: captionText || '' },
+      footer: { text: footerText || '' },
+      nativeFlowMessage: {
+        buttons: nativeButtons,
+        messageParamsJson: '',
+        messageVersion: 1
+      }
+    }
+  };
+
+  const wamsg = generateWAMessageFromContent(jid, msgContent, {
+    userJid: sock.user?.id || jid
+  });
+
+  await sock.relayMessage(jid, wamsg.message, { messageId: wamsg.key.id });
+  return wamsg;
+}
+
+// === HELPER: Construir lista de botones nativos desde el array del request ===
+function buildNativeButtons(buttons) {
+  if (!buttons || !Array.isArray(buttons)) return [];
+  return buttons.map(b => {
+    const label = b.buttonText?.displayText || b.text || b.label || b.title || 'Opcion';
+    const btnUrl = b.url || '';
+    if (btnUrl) {
+      return {
+        name: 'cta_url',
+        buttonParamsJson: JSON.stringify({ display_text: label, url: btnUrl, merchant_url: btnUrl })
+      };
+    } else {
+      return {
+        name: 'quick_reply',
+        buttonParamsJson: JSON.stringify({
+          display_text: label,
+          id: b.id || label.toLowerCase().replace(/\s+/g, '_')
+        })
+      };
+    }
+  });
 }
 
 // Middleware: parse multipart/form-data text fields (no external deps)
@@ -192,94 +282,99 @@ router.post('/chats/:chatId/send', async (req, res) => {
     let textForLog = typeof message === 'string' ? message : message.caption || '';
 
     if (type === 'template_pro') {
-      // === PLANTILLA PRO: imagen/video + caption + BOTONES INTERACTIVOS ===
+      // === PLANTILLA PRO: imagen/video + caption + BOTONES INTERACTIVOS REALES ===
       const captionText = caption || (typeof message === 'string' ? message : '');
-
-      // Construir botones interactivos reales
-      const interactiveButtons = [];
-      if (buttons && Array.isArray(buttons) && buttons.length > 0) {
-        for (const b of buttons) {
-          const label = b.buttonText?.displayText || b.text || b.label || b.title || 'Opcion';
-          const btnUrl = b.url || '';
-          if (btnUrl) {
-            interactiveButtons.push({
-              name: 'cta_url',
-              buttonParamsJson: JSON.stringify({ display_text: label, url: btnUrl, merchant_url: btnUrl })
-            });
-          } else {
-            interactiveButtons.push({
-              name: 'quick_reply',
-              buttonParamsJson: JSON.stringify({ display_text: label, id: b.id || label.toLowerCase().replace(/\s+/g, '_') })
-            });
-          }
-        }
-      }
-
-      // Construir el mensaje con botones interactivos
-      let mainPayload = {};
-      if (mediaUrl) {
-        try {
-          const { buffer, contentType } = await downloadMediaBuffer(mediaUrl);
-          const mType = detectMediaType(mediaUrl, contentType);
-          if (interactiveButtons.length > 0) {
-            if (mType === 'video') {
-              mainPayload = { video: buffer, caption: captionText, mimetype: contentType || 'video/mp4', gifPlayback: false, interactiveButtons };
-            } else {
-              mainPayload = { image: buffer, caption: captionText, mimetype: contentType || 'image/jpeg', interactiveButtons };
-            }
-          } else {
-            if (mType === 'video') {
-              mainPayload = { video: buffer, caption: captionText, mimetype: contentType || 'video/mp4', gifPlayback: false };
-            } else {
-              mainPayload = { image: buffer, caption: captionText, mimetype: contentType || 'image/jpeg' };
-            }
-          }
-          textForLog = '[' + mType + '+btn] ' + (captionText || '').substring(0, 50);
-        } catch (mediaErr) {
-          console.error('[TemplatePro] Error descargando media:', mediaErr.message);
-          if (interactiveButtons.length > 0) {
-            mainPayload = { image: { url: mediaUrl }, caption: captionText, interactiveButtons };
-          } else {
-            mainPayload = { image: { url: mediaUrl }, caption: captionText };
-          }
-          textForLog = '[img-url+btn] ' + (captionText || '').substring(0, 50);
-        }
-      } else if (interactiveButtons.length > 0) {
-        mainPayload = { text: captionText || (typeof message === 'string' ? message : ''), footer: footer || '', interactiveButtons };
-        textForLog = '[btn] ' + (captionText || '').substring(0, 50);
-      } else {
-        mainPayload = { text: typeof message === 'string' ? message : '' };
-      }
+      const nativeButtons = buildNativeButtons(buttons);
 
       let mainResult;
-      let btnMethod = 'interactive';
-      try {
-        mainResult = await sendMessage(chatId, mainPayload);
-      } catch (interactiveErr) {
-        console.error('[TemplatePro] interactiveButtons fallo:', interactiveErr.message);
-        btnMethod = 'fallback';
-        if (mediaUrl) {
+      let btnMethod = 'none';
+      let mType = 'image';
+
+      if (mediaUrl) {
+        let mediaBuffer = null;
+        let mediaContentType = 'image/jpeg';
+        try {
+          const dl = await downloadMediaBuffer(mediaUrl);
+          mediaBuffer = dl.buffer;
+          mediaContentType = dl.contentType;
+          mType = detectMediaType(mediaUrl, mediaContentType);
+        } catch (dlErr) {
+          console.error('[TemplatePro] Error descargando media:', dlErr.message);
+        }
+
+        textForLog = '[' + mType + '+btn] ' + captionText.substring(0, 50);
+
+        if (nativeButtons.length > 0 && mediaBuffer) {
+          // === METODO 1: relayMessage + proto directo (botones reales) ===
           try {
-            const { payload } = await buildMediaPayload(mediaUrl, captionText);
-            mainResult = await sendMessage(chatId, payload);
-          } catch {
-            mainResult = await sendMessage(chatId, { image: { url: mediaUrl }, caption: captionText });
+            mainResult = await sendInteractiveMessageDirect(chatId, {
+              buffer: mediaBuffer,
+              contentType: mediaContentType,
+              mediaType: mType,
+              captionText,
+              footerText: footer || '',
+              nativeButtons
+            });
+            btnMethod = 'relay_interactive';
+            console.log('[TemplatePro] relayMessage OK, botones:', nativeButtons.length);
+          } catch (relayErr) {
+            console.error('[TemplatePro] relayMessage fallo:', relayErr.message, '- intentando sendMessage interactiveButtons');
+            // === METODO 2: sendMessage con interactiveButtons ===
+            try {
+              const payload = mType === 'video'
+                ? { video: mediaBuffer, caption: captionText, mimetype: mediaContentType, gifPlayback: false, interactiveButtons: nativeButtons }
+                : { image: mediaBuffer, caption: captionText, mimetype: mediaContentType, interactiveButtons: nativeButtons };
+              mainResult = await sendMessage(chatId, payload);
+              btnMethod = 'sendmsg_interactive';
+            } catch (sendErr) {
+              console.error('[TemplatePro] sendMessage interactiveButtons fallo:', sendErr.message, '- fallback a media+texto');
+              // === FALLBACK: media normal + botones como texto ===
+              const plainPayload = mType === 'video'
+                ? { video: mediaBuffer, caption: captionText, mimetype: mediaContentType, gifPlayback: false }
+                : { image: mediaBuffer, caption: captionText, mimetype: mediaContentType };
+              mainResult = await sendMessage(chatId, plainPayload);
+              btnMethod = 'text_fallback';
+              if (buttons && buttons.length > 0) {
+                const btnText = buttons.map((b, i) => {
+                  const label = b.buttonText?.displayText || b.text || b.label || b.title || ('Opcion ' + (i + 1));
+                  const url = b.url || '';
+                  return url ? ('ð ' + label + ': ' + url) : ('â¶ ' + label);
+                }).join('\n');
+                await sendMessage(chatId, { text: btnText + (footer ? '\n\n' + footer : '') }).catch(() => {});
+              }
+            }
           }
+        } else if (mediaBuffer) {
+          // Solo media sin botones
+          const payload = mType === 'video'
+            ? { video: mediaBuffer, caption: captionText, mimetype: mediaContentType, gifPlayback: false }
+            : { image: mediaBuffer, caption: captionText, mimetype: mediaContentType };
+          mainResult = await sendMessage(chatId, payload);
         } else {
-          mainResult = await sendMessage(chatId, { text: captionText || (typeof message === 'string' ? message : '') });
+          // Media fallo descarga, intentar con URL directa
+          mainResult = await sendMessage(chatId, { image: { url: mediaUrl }, caption: captionText });
+          textForLog = '[img-url] ' + captionText.substring(0, 50);
         }
-        if (buttons && buttons.length > 0) {
-          const btnText = buttons.map((b, i) => {
-            const label = b.buttonText?.displayText || b.text || b.label || b.title || ('Opcion ' + (i + 1));
-            const url = b.url || '';
-            return url ? (label + ': ' + url) : ('> ' + label);
-          }).join('\n');
-          const footerText = footer ? ('\n\n' + footer) : '';
-          await sendMessage(chatId, { text: btnText + footerText }).catch(() => {});
+      } else if (nativeButtons.length > 0) {
+        // Solo texto + botones
+        textForLog = '[btn] ' + captionText.substring(0, 50);
+        try {
+          mainResult = await sendInteractiveMessageDirect(chatId, {
+            buffer: null,
+            captionText,
+            footerText: footer || '',
+            nativeButtons
+          });
+          btnMethod = 'relay_interactive';
+        } catch (e) {
+          mainResult = await sendMessage(chatId, { text: captionText, footer: footer || '', interactiveButtons: nativeButtons });
+          btnMethod = 'sendmsg_interactive';
         }
+      } else {
+        mainResult = await sendMessage(chatId, { text: typeof message === 'string' ? message : '' });
       }
 
-      const msgId = mainResult.key.id || mainResult.key;
+      const msgId = mainResult.key?.id || mainResult.key;
       const chatName = getContactName(chatId) || chatId.split('@')[0];
       saveMessage(chatId, chatName, { messageId: msgId, fromMe: true, text: textForLog, type: type, timestamp: Date.now() }).catch(() => {});
       upsertChat(chatId, chatName, textForLog, Date.now()).catch(() => {});
@@ -323,7 +418,7 @@ router.post('/chats/:chatId/send', async (req, res) => {
     }
 
     const result = await sendMessage(chatId, content);
-    const msgId = result.key.id || result.key;
+    const msgId = result.key?.id || result.key;
     const chatName = getContactName(chatId) || chatId.split('@')[0];
     saveMessage(chatId, chatName, { messageId: msgId, fromMe: true, text: textForLog, type: type, timestamp: Date.now() }).catch(() => {});
     upsertChat(chatId, chatName, textForLog, Date.now()).catch(() => {});
@@ -345,58 +440,101 @@ router.post('/send', async (req, res) => {
     let textForLog = typeof msg === 'string' ? msg : msg.caption || '';
 
     if (type === 'template_pro') {
-      // === PLANTILLA PRO: imagen/video + caption + BOTONES INTERACTIVOS ===
+      // === PLANTILLA PRO: imagen/video + caption + BOTONES INTERACTIVOS REALES ===
       const captionText = caption || (typeof msg === 'string' ? msg : '');
+      const nativeButtons = buildNativeButtons(buttons);
 
-      const interactiveButtons = [];
-      if (buttons && Array.isArray(buttons) && buttons.length > 0) {
-        for (const b of buttons) {
-          const label = b.buttonText?.displayText || b.text || b.label || b.title || 'Opcion';
-          const btnUrl = b.url || '';
-          if (btnUrl) {
-            interactiveButtons.push({
-              name: 'cta_url',
-              buttonParamsJson: JSON.stringify({ display_text: label, url: btnUrl, merchant_url: btnUrl })
-            });
-          } else {
-            interactiveButtons.push({
-              name: 'quick_reply',
-              buttonParamsJson: JSON.stringify({ display_text: label, id: b.id || label.toLowerCase().replace(/\s+/g, '_') })
-            });
-          }
-        }
-      }
+      let result;
+      let btnMethod = 'none';
+      let mType = 'image';
 
       if (mediaUrl) {
+        let mediaBuffer = null;
+        let mediaContentType = 'image/jpeg';
         try {
-          const { buffer, contentType } = await downloadMediaBuffer(mediaUrl);
-          const mType = detectMediaType(mediaUrl, contentType);
-          if (interactiveButtons.length > 0) {
-            if (mType === 'video') {
-              content = { video: buffer, caption: captionText, mimetype: contentType || 'video/mp4', gifPlayback: false, interactiveButtons };
-            } else {
-              content = { image: buffer, caption: captionText, mimetype: contentType || 'image/jpeg', interactiveButtons };
-            }
-          } else {
-            if (mType === 'video') {
-              content = { video: buffer, caption: captionText, mimetype: contentType || 'video/mp4', gifPlayback: false };
-            } else {
-              content = { image: buffer, caption: captionText, mimetype: contentType || 'image/jpeg' };
+          const dl = await downloadMediaBuffer(mediaUrl);
+          mediaBuffer = dl.buffer;
+          mediaContentType = dl.contentType;
+          mType = detectMediaType(mediaUrl, mediaContentType);
+        } catch (dlErr) {
+          console.error('[TemplatePro/send] Error descargando media:', dlErr.message);
+        }
+
+        textForLog = '[' + mType + '+btn] ' + captionText.substring(0, 50);
+
+        if (nativeButtons.length > 0 && mediaBuffer) {
+          // === METODO 1: relayMessage + proto directo ===
+          try {
+            result = await sendInteractiveMessageDirect(chatId, {
+              buffer: mediaBuffer,
+              contentType: mediaContentType,
+              mediaType: mType,
+              captionText,
+              footerText: footer || '',
+              nativeButtons
+            });
+            btnMethod = 'relay_interactive';
+            console.log('[TemplatePro/send] relayMessage OK, botones:', nativeButtons.length);
+          } catch (relayErr) {
+            console.error('[TemplatePro/send] relayMessage fallo:', relayErr.message);
+            // === METODO 2: sendMessage interactiveButtons ===
+            try {
+              content = mType === 'video'
+                ? { video: mediaBuffer, caption: captionText, mimetype: mediaContentType, gifPlayback: false, interactiveButtons: nativeButtons }
+                : { image: mediaBuffer, caption: captionText, mimetype: mediaContentType, interactiveButtons: nativeButtons };
+              result = await sendMessage(chatId, content);
+              btnMethod = 'sendmsg_interactive';
+            } catch (sendErr) {
+              console.error('[TemplatePro/send] sendMessage fallo:', sendErr.message, '- fallback');
+              // === FALLBACK texto ===
+              const plainPayload = mType === 'video'
+                ? { video: mediaBuffer, caption: captionText, mimetype: mediaContentType, gifPlayback: false }
+                : { image: mediaBuffer, caption: captionText, mimetype: mediaContentType };
+              result = await sendMessage(chatId, plainPayload);
+              btnMethod = 'text_fallback';
+              if (buttons && buttons.length > 0) {
+                const btnText = buttons.map((b, i) => {
+                  const label = b.buttonText?.displayText || b.text || b.label || b.title || ('Opcion ' + (i + 1));
+                  const url = b.url || '';
+                  return url ? ('ð ' + label + ': ' + url) : ('â¶ ' + label);
+                }).join('\n');
+                await sendMessage(chatId, { text: btnText + (footer ? '\n\n' + footer : '') }).catch(() => {});
+              }
             }
           }
-          textForLog = '[' + mType + '+btn] ' + (captionText || '').substring(0, 50);
-        } catch (mediaErr) {
-          console.error('[TemplatePro] Error descargando media:', mediaErr.message);
-          content = interactiveButtons.length > 0
-            ? { image: { url: mediaUrl }, caption: captionText, interactiveButtons }
-            : { image: { url: mediaUrl }, caption: captionText };
-          textForLog = '[img-url+btn] ' + (captionText || '').substring(0, 50);
+        } else if (mediaBuffer) {
+          const payload = mType === 'video'
+            ? { video: mediaBuffer, caption: captionText, mimetype: mediaContentType, gifPlayback: false }
+            : { image: mediaBuffer, caption: captionText, mimetype: mediaContentType };
+          result = await sendMessage(chatId, payload);
+        } else {
+          result = await sendMessage(chatId, { image: { url: mediaUrl }, caption: captionText });
+          textForLog = '[img-url] ' + captionText.substring(0, 50);
         }
-      } else if (interactiveButtons.length > 0) {
-        content = { text: captionText, footer: footer || '', interactiveButtons };
+      } else if (nativeButtons.length > 0) {
+        textForLog = '[btn] ' + captionText.substring(0, 50);
+        try {
+          result = await sendInteractiveMessageDirect(chatId, {
+            buffer: null,
+            captionText,
+            footerText: footer || '',
+            nativeButtons
+          });
+          btnMethod = 'relay_interactive';
+        } catch (e) {
+          content = { text: captionText, footer: footer || '', interactiveButtons: nativeButtons };
+          result = await sendMessage(chatId, content);
+          btnMethod = 'sendmsg_interactive';
+        }
       } else {
         content = { text: typeof msg === 'string' ? msg : '' };
+        result = await sendMessage(chatId, content);
       }
+
+      const chatName = getContactName(chatId) || chatId.split('@')[0];
+      saveMessage(chatId, chatName, { messageId: result.key?.id, fromMe: true, text: textForLog, type: type, timestamp: Date.now() }).catch(() => {});
+      upsertChat(chatId, chatName, textForLog, Date.now()).catch(() => {});
+      return res.json({ success: true, messageId: result.key?.id, btnMethod });
 
     } else if (type === 'image') {
       const imgUrl = mediaUrl || (typeof msg === 'object' ? msg.url : msg);
@@ -435,42 +573,11 @@ router.post('/send', async (req, res) => {
       content = typeof msg === 'string' ? msg : msg;
     }
 
-    // Intentar envio con botones interactivos, fallback a texto
-    let result;
-    let btnMethod = 'none';
-    try {
-      result = await sendMessage(chatId, content);
-      btnMethod = (type === 'template_pro' && buttons && buttons.length > 0) ? 'interactive' : 'none';
-    } catch (sendErr) {
-      if (type === 'template_pro' && buttons && buttons.length > 0) {
-        console.error('[TemplatePro/send] interactiveButtons fallo:', sendErr.message);
-        btnMethod = 'fallback';
-        const captionText2 = caption || (typeof msg === 'string' ? msg : '');
-        if (mediaUrl) {
-          try {
-            const { payload } = await buildMediaPayload(mediaUrl, captionText2);
-            result = await sendMessage(chatId, payload);
-          } catch {
-            result = await sendMessage(chatId, { image: { url: mediaUrl }, caption: captionText2 });
-          }
-        } else {
-          result = await sendMessage(chatId, { text: captionText2 });
-        }
-        const btnText = buttons.map((b, i) => {
-          const label = b.buttonText?.displayText || b.text || b.label || b.title || ('Opcion ' + (i + 1));
-          const url = b.url || '';
-          return url ? (label + ': ' + url) : ('> ' + label);
-        }).join('\n');
-        await sendMessage(chatId, { text: btnText + (footer ? '\n\n' + footer : '') }).catch(() => {});
-      } else {
-        throw sendErr;
-      }
-    }
-
+    const result = await sendMessage(chatId, content);
     const chatName = getContactName(chatId) || chatId.split('@')[0];
-    saveMessage(chatId, chatName, { messageId: result.key.id, fromMe: true, text: textForLog, type: type, timestamp: Date.now() }).catch(() => {});
+    saveMessage(chatId, chatName, { messageId: result.key?.id, fromMe: true, text: textForLog, type: type, timestamp: Date.now() }).catch(() => {});
     upsertChat(chatId, chatName, textForLog, Date.now()).catch(() => {});
-    res.json({ success: true, messageId: result.key.id, btnMethod });
+    res.json({ success: true, messageId: result.key?.id, btnMethod: 'none' });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -481,7 +588,7 @@ router.post('/disconnect', async (req, res) => {
 
 router.get('/settings', (req, res) => {
   res.json({
-    server: 'sanate-wa-server', version: '3.2.0', engine: 'baileys-standalone',
+    server: 'sanate-wa-server', version: '3.3.0', engine: 'baileys-standalone',
     connection: getConnectionState(), sse: req.app.get('sse')?.getStatus(),
     supabase: !!req.app.get('supabase'), uptime: Math.floor(process.uptime()),
     contacts: contactCache.keys().length
@@ -577,9 +684,7 @@ router.post('/ai-config', (req, res) => {
 // --- AI USAGE ---
 router.get('/ai-usage', (req, res) => {
   try { res.json(getUsageStats()); }
-  catch (err) { res.status(500).json({ error: err.message });
-}
+  catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 module.exports = router;
-
