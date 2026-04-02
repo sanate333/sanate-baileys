@@ -30,6 +30,13 @@ function getDevice(id) {
 }
 getDevice('default');
 
+// Normalize JID for storage keys: strip @s.whatsapp.net to prevent duplicate chats
+function nJ(jid) {
+  if (!jid) return jid;
+  if (jid.endsWith('@g.us') || jid.endsWith('@lid') || jid === 'status@broadcast') return jid;
+  return jid.replace(/@s\.whatsapp\.net$/, '');
+}
+
 function broadcastSSE(dev, event, data) {
   const msg = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
   for (const client of dev.sseClients) {
@@ -133,7 +140,7 @@ function storeMsg(dev, msg) {
     const cutoff = Date.now() - WA_HISTORY_DAYS*86400000;
     const ts = (msg.messageTimestamp||0)*1000;
     if (ts && ts < cutoff) return;
-    const jid = msg.key?.remoteJid;
+    const jid = nJ(msg.key?.remoteJid);
     if (!jid || jid === 'status@broadcast') return;
     const m = msg.message || {};
     const body = m.conversation || m.extendedTextMessage?.text
@@ -187,16 +194,17 @@ async function connectDevice(deviceId) {
       if (type!=='notify'&&type!=='append') return;
       for (const msg of messages) storeMsg(dev, msg);
       messages.forEach(m => {
-        if (m.pushName&&m.key?.remoteJid) { dev.waContacts.set(m.key.remoteJid, m.pushName); }
-        const fromJid = m.key?.remoteJid;
-        if (fromJid&&!fromJid.endsWith('@g.us')&&m.key&&!m.key.fromMe) {
+        if (m.pushName&&m.key?.remoteJid) { dev.waContacts.set(nJ(m.key.remoteJid), m.pushName); }
+        const fromJid = m.key?.remoteJid; // full JID for sendMessage
+        const fromKey = nJ(fromJid);       // normalized key for storage
+        if (fromKey&&!fromKey.endsWith('@g.us')&&m.key&&!m.key.fromMe) {
           // Auto-classify lead for incoming messages
-          setTimeout(() => autoClassifyLead(dev, fromJid), 1000);
+          setTimeout(() => autoClassifyLead(dev, fromKey), 1000);
           // Welcome message
-          if (dev.waWelcomeTemplate&&!dev.waSentWelcome.has(fromJid)) {
-            const msgs = dev.waMessages.get(fromJid)||[];
+          if (dev.waWelcomeTemplate&&!dev.waSentWelcome.has(fromKey)) {
+            const msgs = dev.waMessages.get(fromKey)||[];
             if (msgs.length<=1) {
-              dev.waSentWelcome.add(fromJid);
+              dev.waSentWelcome.add(fromKey);
               setTimeout(() => { if (dev.sock&&dev.status==='connected') dev.sock.sendMessage(fromJid,{text:dev.waWelcomeTemplate}).catch(()=>{}); }, 2000);
             }
           }
@@ -210,8 +218,9 @@ async function connectDevice(deviceId) {
       const cutoff = Date.now()-WA_HISTORY_DAYS*86400000;
       for (const chat of chats) {
         if (!chat.id||chat.id==='status@broadcast') continue;
-        if (!dev.waChats.has(chat.id)) {
-          dev.waChats.set(chat.id, { id:chat.id, name:dev.waContacts.get(chat.id)||chat.name||chat.id.split('@')[0], unread:chat.unreadCount||0, lastMsg:'', ts:Date.now() });
+        const cid = nJ(chat.id);
+        if (!dev.waChats.has(cid)) {
+          dev.waChats.set(cid, { id:cid, name:dev.waContacts.get(cid)||chat.name||cid.split('@')[0], unread:chat.unreadCount||0, lastMsg:'', ts:Date.now() });
         }
       }
       for (const msg of messages) { const ts=(msg.messageTimestamp||0)*1000; if (ts&&ts<cutoff) continue; storeMsg(dev,msg); }
@@ -220,16 +229,18 @@ async function connectDevice(deviceId) {
     dev.sock.ev.on('chats.upsert', (chats) => {
       for (const chat of chats) {
         if (!chat.id||chat.id==='status@broadcast') continue;
-        const prev = dev.waChats.get(chat.id)||{};
-        dev.waChats.set(chat.id, { ...prev, id:chat.id, name:dev.waContacts.get(chat.id)||chat.name||prev.name||chat.id.split('@')[0], unread:chat.unreadCount!==undefined?chat.unreadCount:(prev.unread||0), ts:prev.ts||Date.now() });
+        const cid = nJ(chat.id);
+        const prev = dev.waChats.get(cid)||{};
+        dev.waChats.set(cid, { ...prev, id:cid, name:dev.waContacts.get(cid)||chat.name||prev.name||cid.split('@')[0], unread:chat.unreadCount!==undefined?chat.unreadCount:(prev.unread||0), ts:prev.ts||Date.now() });
       }
     });
     dev.sock.ev.on('contacts.upsert', contacts => {
       contacts.forEach(c => {
         const name = c.notify||c.name||c.verifiedName;
+        const cid = nJ(c.id);
         if (name) {
-          dev.waContacts.set(c.id, name);
-          if (dev.waChats.has(c.id)) dev.waChats.set(c.id,{...dev.waChats.get(c.id),name});
+          dev.waContacts.set(cid, name);
+          if (dev.waChats.has(cid)) dev.waChats.set(cid,{...dev.waChats.get(cid),name});
         }
       });
       // Persist contacts
@@ -346,12 +357,15 @@ app.post('/send', auth, async (req,res) => {
   if (!dev.sock||dev.status!=='connected') return res.status(400).json({error:'No conectado'});
   try {
     const jid = to.includes('@s.whatsapp.net') ? to : to + '@s.whatsapp.net';
+    const key = nJ(jid);
     const result = await dev.sock.sendMessage(jid, { text: message });
     // Store sent message in waMessages so it shows in dashboard
-    const arr = dev.waMessages.get(jid) || [];
+    const arr = dev.waMessages.get(key) || [];
     arr.push({ id: result.key.id, body: message, fromMe: true, ts: Date.now() });
     if (arr.length > 500) arr.splice(0, arr.length - 500);
-    dev.waMessages.set(jid, arr);
+    dev.waMessages.set(key, arr);
+    const chatPrev = dev.waChats.get(key) || {};
+    dev.waChats.set(key, { ...chatPrev, id:key, name:dev.waContacts.get(key)||chatPrev.name||key, lastMsg:message, ts:Date.now() });
     res.json({ success: true, messageId: result.key.id });
   } catch (e) { res.status(500).json({ error: e.message }) }
 });
@@ -388,6 +402,7 @@ app.post('/send-list', auth, async (req,res) => {
   if (!dev.sock||dev.status!=='connected') return res.status(400).json({error:'No conectado'});
   try {
     const jid = to.includes('@') ? to : to.replace(/\D/g,'') + '@s.whatsapp.net';
+    const key = nJ(jid);
     const result = await dev.sock.sendMessage(jid, {
       text: text || '',
       footer: footer || '',
@@ -395,10 +410,12 @@ app.post('/send-list', auth, async (req,res) => {
       buttonText: buttonText || 'Ver opciones',
       sections: sections || []
     });
-    const arr = dev.waMessages.get(jid) || [];
+    const arr = dev.waMessages.get(key) || [];
     arr.push({ id: result.key.id, body: '[Lista: ' + (buttonText||'Ver opciones') + ']', fromMe: true, ts: Date.now() });
     if (arr.length > 500) arr.splice(0, arr.length - 500);
-    dev.waMessages.set(jid, arr);
+    dev.waMessages.set(key, arr);
+    const chatPrev = dev.waChats.get(key) || {};
+    dev.waChats.set(key, { ...chatPrev, id:key, name:dev.waContacts.get(key)||chatPrev.name||key, lastMsg:'[Lista]', ts:Date.now() });
     res.json({ ok: true, messageId: result.key.id });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
