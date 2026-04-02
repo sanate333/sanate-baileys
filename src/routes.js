@@ -119,6 +119,34 @@ async function sendInteractiveMessageDirect(chatId, { buffer, contentType, media
   return wamsg;
 }
 
+// === HELPER: Enviar lista interactiva con proto directo ===
+async function sendListMessageDirect(chatId, { captionText, footerText, headerTitle, buttonText, sections }) {
+  const sock = getSocket();
+  if (!sock) throw new Error('Socket de WhatsApp no disponible');
+  const jid = chatId.includes('@') ? chatId : chatId + '@s.whatsapp.net';
+  const { generateWAMessageFromContent, proto } = getBaileysFns();
+  if (!generateWAMessageFromContent || !proto) throw new Error('Baileys internals no disponibles');
+  const mappedSections = sections.map(s => ({
+    title: s.title || '',
+    rows: (s.rows || []).map((r, i) => ({
+      rowId: r.rowId || r.id || ('row_' + i),
+      title: r.title || '',
+      description: r.description || ''
+    }))
+  }));
+  const listMsg = proto.Message.ListMessage.create({
+    title: headerTitle || '',
+    description: captionText || '',
+    buttonText: buttonText || 'Ver opciones',
+    listType: proto.Message.ListMessage.ListType.SINGLE_SELECT,
+    footerText: footerText || '',
+    sections: mappedSections
+  });
+  const wamsg = generateWAMessageFromContent(jid, { listMessage: listMsg }, { userJid: sock.user?.id || jid });
+  await sock.relayMessage(jid, wamsg.message, { messageId: wamsg.key.id });
+  return wamsg;
+}
+
 // === HELPER: Normalizar JID para almacenamiento (evita chats duplicados) ===
 function normalizeStorageJid(jid) {
   if (!jid) return jid;
@@ -388,23 +416,32 @@ router.post('/chats/:chatId/send', async (req, res) => {
       return res.json({ ok: true, success: true, messageId: msgId, btnMethod });
 
     } else if (type === 'list') {
-      // === LISTA INTERACTIVA: botones visuales reales en WhatsApp personal ===
+      // === LISTA INTERACTIVA: proto directo (generateWAMessageFromContent + relayMessage) ===
       const captionText = caption || (typeof message === 'string' ? message : '');
       const btnLabel = req.body.buttonText || 'Ver opciones';
       const sectionTitle = req.body.sectionTitle || 'Opciones';
       const rows = (buttons || []).map((b, i) => {
         const title = b.buttonText?.displayText || b.text || b.label || b.title || ('Opcion ' + (i + 1));
-        const id = b.id || title.toLowerCase().replace(/[^a-z0-9]/g, '_').substring(0, 20);
-        return { title, id, description: b.description || '' };
+        const rowId = b.id || title.toLowerCase().replace(/[^a-z0-9]/g, '_').substring(0, 20);
+        return { rowId, title, description: b.description || '' };
       });
-      const listContent = {
-        text: captionText,
-        footer: footer || '',
-        title: req.body.listTitle || req.body.title || header || '',
-        buttonText: btnLabel,
-        sections: [{ title: sectionTitle, rows }]
-      };
-      const listResult = await sendMessage(chatId, listContent);
+      let listResult;
+      try {
+        listResult = await sendListMessageDirect(chatId, {
+          captionText, footerText: footer || '',
+          headerTitle: req.body.listTitle || req.body.title || header || '',
+          buttonText: btnLabel,
+          sections: [{ title: sectionTitle, rows }]
+        });
+      } catch (listProtoErr) {
+        console.error('[List] proto fallo, fallback:', listProtoErr.message);
+        listResult = await sendMessage(chatId, {
+          text: captionText, footer: footer || '',
+          title: req.body.listTitle || req.body.title || header || '',
+          buttonText: btnLabel,
+          sections: [{ title: sectionTitle, rows }]
+        });
+      }
       const listMsgId = listResult.key?.id;
       const storageJidL = normalizeStorageJid(chatId);
       const chatNameL = getContactName(chatId) || storageJidL.split('@')[0];
