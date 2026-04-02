@@ -100,7 +100,6 @@ async function connectToWhatsApp() {
 
       if (msg.key.remoteJid && msg.key.remoteJid.endsWith('@lid')) continue;
       const chatId = msg.key.remoteJid;
-        const storageId = normalizeJid(chatId);
       const storageId = normalizeJid(chatId);
       const fromMe = msg.key.fromMe || false;
       const isGroup = isJidGroup(chatId);
@@ -188,9 +187,10 @@ async function runInitialSync() {
       if (isJidBroadcast(msg.key.remoteJid)) return;
 
       const chatId = msg.key.remoteJid;
+        const storageId = normalizeJid(chatId);
       if (!syncedChats.has(chatId)) {
         syncedChats.set(chatId, {
-          jid: chatId,
+          jid: storageId,
           name: msg.pushName || contactCache.get(chatId) || chatId.split('@')[0],
           lastMessage: extractText(msg) || '[media]',
           lastTimestamp: msg.messageTimestamp,
