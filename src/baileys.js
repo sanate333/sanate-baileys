@@ -47,7 +47,11 @@ async function connectToWhatsApp() {
     generateHighQualityLinkPreview: true,
     syncFullHistory: true,
     markOnlineOnConnect: true,
-    getMessage: async (key) => ({ conversation: '' })
+    getMessage: async (key) => {
+      // Retornar undefined permite que Baileys maneje los reintentos de sesion Signal
+      // correctamente. Retornar { conversation: '' } causaba un loop de prekey bundle.
+      return undefined;
+    }
   });
 
   sock.ev.on('creds.update', saveCreds);
@@ -94,11 +98,24 @@ async function connectToWhatsApp() {
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     for (const msg of messages) {
-      if (!msg.message) continue;
       if (isJidBroadcast(msg.key.remoteJid)) continue;
       if (msg.key.remoteJid === 'status@broadcast') continue;
-
       if (msg.key.remoteJid && msg.key.remoteJid.endsWith('@lid')) continue;
+
+      // Si msg.message es null (session reset / prekey bundle), enviar un mensaje
+      // vacio para establecer la sesion Signal y permitir que el siguiente mensaje llegue
+      if (!msg.message) {
+        if (!msg.key.fromMe && msg.key.remoteJid && type === 'notify') {
+          const jid = msg.key.remoteJid;
+          console.log('[SESSION] Prekey bundle de', jid.split('@')[0], '- estableciendo sesion...');
+          try {
+            await sock.sendMessage(jid, { text: '\u200b' }); // zero-width space para establecer sesion
+          } catch (e) {
+            console.log('[SESSION] Error estableciendo sesion:', e.message);
+          }
+        }
+        continue;
+      }
       const chatId = msg.key.remoteJid;
       const storageId = normalizeJid(chatId);
       const fromMe = msg.key.fromMe || false;
