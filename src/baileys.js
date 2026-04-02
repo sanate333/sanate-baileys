@@ -331,7 +331,8 @@ async function sendMessage(chatId, content) {
   const storageId = normalizeJid(chatId);
   if (!sock || connectionState !== 'connected') throw new Error('WhatsApp no esta conectado');
   const messagePayload = typeof content === 'string' ? { text: content } : content;
-  const sent = await sock.sendMessage(chatId, messagePayload);
+  const waJid = chatId.includes('@') ? chatId : chatId + '@s.whatsapp.net';
+  const sent = await sock.sendMessage(waJid, messagePayload);
   const sentText = typeof content === 'string' ? content : (content.text || '[media]');
 
   await saveMessage(storageId, 'Sanate Bot', {
