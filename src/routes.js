@@ -1,6 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const QRCode = require('qrcode');
+const multer = require('multer');
+const uploadNone = multer().none(); // parsea FormData sin archivos (solo campos de texto)
 const { getConnectionState, getQR, getProfilePhoto, getContactName, sendMessage, disconnect, getSocket, contactCache } = require('./baileys');
 const { getChats, getMessages, saveMessage, upsertChat } = require('./supabase');
 const { getConfig, setConfig, getUsageStats } = require('./auto-reply');
@@ -66,8 +68,7 @@ async function buildMediaPayload(mediaUrl, captionText, options = {}) {
 }
 
 // === HELPER PRINCIPAL: Enviar mensaje interactivo con proto directo ===
-// Usa generateWAMessageFromContent + relayMessage en lugar de sendMessage
-// para garantizar que los botones lleguen correctamente (nativeFlowMessage)
+// Usa generateWAMessageFromContent + relayMessage para nativeFlowMessage (botones reales)
 async function sendInteractiveMessageDirect(chatId, { buffer, contentType, mediaType, captionText, footerText, nativeButtons }) {
   const sock = getSocket();
   if (!sock) throw new Error('Socket de WhatsApp no disponible');
@@ -119,13 +120,12 @@ async function sendInteractiveMessageDirect(chatId, { buffer, contentType, media
   return wamsg;
 }
 
-// === HELPER: Enviar lista interactiva con proto directo ===
+// === HELPER: Enviar lista interactiva ===
+// Usa sock.sendMessage (alto nivel) para que maneje establecimiento de sesion Signal Protocol
 async function sendListMessageDirect(chatId, { captionText, footerText, headerTitle, buttonText, sections }) {
   const sock = getSocket();
   if (!sock) throw new Error('Socket de WhatsApp no disponible');
   const jid = chatId.includes('@') ? chatId : chatId + '@s.whatsapp.net';
-  const { generateWAMessageFromContent, proto } = getBaileysFns();
-  if (!generateWAMessageFromContent || !proto) throw new Error('Baileys internals no disponibles');
   const mappedSections = sections.map(s => ({
     title: s.title || '',
     rows: (s.rows || []).map((r, i) => ({
@@ -134,17 +134,15 @@ async function sendListMessageDirect(chatId, { captionText, footerText, headerTi
       description: r.description || ''
     }))
   }));
-  const listMsg = proto.Message.ListMessage.create({
+  // sock.sendMessage maneja la sesion Signal Protocol automaticamente (a diferencia de relayMessage)
+  const sent = await sock.sendMessage(jid, {
+    text: captionText || '',
+    footer: footerText || '',
     title: headerTitle || '',
-    description: captionText || '',
     buttonText: buttonText || 'Ver opciones',
-    listType: proto.Message.ListMessage.ListType.SINGLE_SELECT,
-    footerText: footerText || '',
     sections: mappedSections
   });
-  const wamsg = generateWAMessageFromContent(jid, { listMessage: listMsg }, { userJid: sock.user?.id || jid });
-  await sock.relayMessage(jid, wamsg.message, { messageId: wamsg.key.id });
-  return wamsg;
+  return sent;
 }
 
 // === HELPER: Normalizar JID para almacenamiento (evita chats duplicados) ===
@@ -270,7 +268,9 @@ router.get('/chats', async (req, res) => {
 
 router.get('/chats/:chatId/messages', async (req, res) => {
   try {
-    const chatId = decodeURIComponent(req.params.chatId);
+    // Normalizar: quitar @s.whatsapp.net para coincidir con como se guardan los mensajes
+    const rawChatId = decodeURIComponent(req.params.chatId);
+    const chatId = rawChatId.replace(/@s\.whatsapp\.net$/, '').replace(/@c\.us$/, '');
     const limit = parseInt(req.query.limit) || 50;
     const before = req.query.before || null;
     const messages = await getMessages(chatId, limit, before);
@@ -306,11 +306,15 @@ router.get('/events', (req, res) => {
 
 // =============================================
 // POST /chats/:chatId/send  (dashboard sends)
+// Acepta tanto JSON como FormData (el dashboard envia FormData con campo "text")
 // =============================================
-router.post('/chats/:chatId/send', async (req, res) => {
+router.post('/chats/:chatId/send', uploadNone, async (req, res) => {
   try {
     const chatId = decodeURIComponent(req.params.chatId);
-    const { message, type = 'text', mediaUrl, caption, header, footer, buttons } = req.body;
+    // Soporta: JSON { message } o FormData { text }
+    const message = req.body.message || req.body.text;
+    const type = req.body.type || 'text';
+    const { mediaUrl, caption, header, footer, buttons } = req.body;
     if (!chatId || !message) return res.status(400).json({ error: 'chatId y message son requeridos' });
 
     let content;
@@ -511,14 +515,11 @@ router.post('/send', async (req, res) => {
     let textForLog = typeof msg === 'string' ? msg : msg.caption || '';
 
     if (type === 'template_pro') {
-      // === PLANTILLA PRO: imagen/video + caption + BOTONES INTERACTIVOS REALES ===
       const captionText = caption || (typeof msg === 'string' ? msg : '');
       const nativeButtons = buildNativeButtons(buttons);
-
       let result;
       let btnMethod = 'none';
       let mType = 'image';
-
       if (mediaUrl) {
         let mediaBuffer = null;
         let mediaContentType = 'image/jpeg';
@@ -530,53 +531,33 @@ router.post('/send', async (req, res) => {
         } catch (dlErr) {
           console.error('[TemplatePro/send] Error descargando media:', dlErr.message);
         }
-
         textForLog = '[' + mType + '+btn] ' + captionText.substring(0, 50);
-
         if (nativeButtons.length > 0 && mediaBuffer) {
-          // === METODO 1: relayMessage + proto directo ===
           try {
-            result = await sendInteractiveMessageDirect(chatId, {
-              buffer: mediaBuffer,
-              contentType: mediaContentType,
-              mediaType: mType,
-              captionText,
-              footerText: footer || '',
-              nativeButtons
-            });
+            result = await sendInteractiveMessageDirect(chatId, { buffer: mediaBuffer, contentType: mediaContentType, mediaType: mType, captionText, footerText: footer || '', nativeButtons });
             btnMethod = 'relay_interactive';
-            console.log('[TemplatePro/send] relayMessage OK, botones:', nativeButtons.length);
           } catch (relayErr) {
             console.error('[TemplatePro/send] relayMessage fallo:', relayErr.message);
-            // === METODO 2: sendMessage interactiveButtons ===
             try {
-              content = mType === 'video'
-                ? { video: mediaBuffer, caption: captionText, mimetype: mediaContentType, gifPlayback: false, interactiveButtons: nativeButtonLs }
+              const payload = mType === 'video'
+                ? { video: mediaBuffer, caption: captionText, mimetype: mediaContentType, gifPlayback: false, interactiveButtons: nativeButtons }
                 : { image: mediaBuffer, caption: captionText, mimetype: mediaContentType, interactiveButtons: nativeButtons };
-              result = await sendMessage(chatId, content);
+              result = await sendMessage(chatId, payload);
               btnMethod = 'sendmsg_interactive';
             } catch (sendErr) {
-              console.error('[TemplatePro/send] sendMessage fallo:', sendErr.message, '- fallback');
-              // === FALLBACK texto ===
               const plainPayload = mType === 'video'
                 ? { video: mediaBuffer, caption: captionText, mimetype: mediaContentType, gifPlayback: false }
                 : { image: mediaBuffer, caption: captionText, mimetype: mediaContentType };
               result = await sendMessage(chatId, plainPayload);
               btnMethod = 'text_fallback';
               if (buttons && buttons.length > 0) {
-                const btnText = buttons.map((b, i) => {
-                  const label = b.buttonText?.displayText || b.text || b.label || b.title || ('Opcion ' + (i + 1));
-                  const url = b.url || '';
-                  return url ? ('🔗 ' + label + ': ' + url) : ('▶ ' + label);
-                }).join('\n');
+                const btnText = buttons.map((b, i) => { const label = b.buttonText?.displayText || b.text || b.label || b.title || ('Opcion ' + (i+1)); const url = b.url || ''; return url ? ('🔗 ' + label + ': ' + url) : ('▶ ' + label); }).join('\n');
                 await sendMessage(chatId, { text: btnText + (footer ? '\n\n' + footer : '') }).catch(() => {});
               }
             }
           }
         } else if (mediaBuffer) {
-          const payload = mType === 'video'
-            ? { video: mediaBuffer, caption: captionText, mimetype: mediaContentType, gifPlayback: false }
-            : { image: mediaBuffer, caption: captionText, mimetype: mediaContentType };
+          const payload = mType === 'video' ? { video: mediaBuffer, caption: captionText, mimetype: mediaContentType, gifPlayback: false } : { image: mediaBuffer, caption: captionText, mimetype: mediaContentType };
           result = await sendMessage(chatId, payload);
         } else {
           result = await sendMessage(chatId, { image: { url: mediaUrl }, caption: captionText });
@@ -585,12 +566,7 @@ router.post('/send', async (req, res) => {
       } else if (nativeButtons.length > 0) {
         textForLog = '[btn] ' + captionText.substring(0, 50);
         try {
-          result = await sendInteractiveMessageDirect(chatId, {
-            buffer: null,
-            captionText,
-            footerText: footer || '',
-            nativeButtons
-          });
+          result = await sendInteractiveMessageDirect(chatId, { buffer: null, captionText, footerText: footer || '', nativeButtons });
           btnMethod = 'relay_interactive';
         } catch (e) {
           content = { text: captionText, footer: footer || '', interactiveButtons: nativeButtons };
@@ -601,7 +577,6 @@ router.post('/send', async (req, res) => {
         content = { text: typeof msg === 'string' ? msg : '' };
         result = await sendMessage(chatId, content);
       }
-
       const storageJidTP = normalizeStorageJid(chatId);
       const chatNameTP = getContactName(chatId) || storageJidTP.split('@')[0];
       saveMessage(storageJidTP, chatNameTP, { messageId: result.key?.id, fromMe: true, text: textForLog, type: type, timestamp: Date.now() }).catch(() => {});
@@ -609,22 +584,11 @@ router.post('/send', async (req, res) => {
       return res.json({ success: true, messageId: result.key?.id, btnMethod });
 
     } else if (type === 'list') {
-      // === LISTA INTERACTIVA: botones visuales reales en WhatsApp personal ===
       const captionText = caption || (typeof msg === 'string' ? msg : '');
       const btnLabel = req.body.buttonText || 'Ver opciones';
       const sectionTitle = req.body.sectionTitle || 'Opciones';
-      const rows = (buttons || []).map((b, i) => {
-        const title = b.buttonText?.displayText || b.text || b.label || b.title || ('Opcion ' + (i + 1));
-        const id = b.id || title.toLowerCase().replace(/[^a-z0-9]/g, '_').substring(0, 20);
-        return { title, id, description: b.description || '' };
-      });
-      const listContent = {
-        text: captionText,
-        footer: footer || '',
-        title: req.body.listTitle || req.body.title || '',
-        buttonText: btnLabel,
-        sections: [{ title: sectionTitle, rows }]
-      };
+      const rows = (buttons || []).map((b, i) => { const title = b.buttonText?.displayText || b.text || b.label || b.title || ('Opcion ' + (i + 1)); const id = b.id || title.toLowerCase().replace(/[^a-z0-9]/g, '_').substring(0, 20); return { title, id, description: b.description || '' }; });
+      const listContent = { text: captionText, footer: footer || '', title: req.body.listTitle || req.body.title || '', buttonText: btnLabel, sections: [{ title: sectionTitle, rows }] };
       const listResult = await sendMessage(chatId, listContent);
       const storageJidList = normalizeStorageJid(chatId);
       const chatNameList = getContactName(chatId) || storageJidList.split('@')[0];
@@ -636,36 +600,18 @@ router.post('/send', async (req, res) => {
     } else if (type === 'image') {
       const imgUrl = mediaUrl || (typeof msg === 'object' ? msg.url : msg);
       const imgCaption = caption || (typeof msg === 'object' ? msg.caption : '');
-      try {
-        const { payload } = await buildMediaPayload(imgUrl, imgCaption, { forceType: 'image' });
-        content = payload;
-      } catch {
-        content = { image: { url: imgUrl }, caption: imgCaption };
-      }
+      try { const { payload } = await buildMediaPayload(imgUrl, imgCaption, { forceType: 'image' }); content = payload; } catch { content = { image: { url: imgUrl }, caption: imgCaption }; }
       textForLog = imgCaption || '[imagen]';
-
     } else if (type === 'video') {
       const vidUrl = mediaUrl || (typeof msg === 'object' ? msg.url : msg);
       const vidCaption = caption || (typeof msg === 'object' ? msg.caption : '');
-      try {
-        const { payload } = await buildMediaPayload(vidUrl, vidCaption, { forceType: 'video' });
-        content = payload;
-      } catch {
-        content = { video: { url: vidUrl }, caption: vidCaption };
-      }
+      try { const { payload } = await buildMediaPayload(vidUrl, vidCaption, { forceType: 'video' }); content = payload; } catch { content = { video: { url: vidUrl }, caption: vidCaption }; }
       textForLog = vidCaption || '[video]';
-
     } else if (type === 'document') {
       const docUrl = mediaUrl || (typeof msg === 'object' ? msg.url : msg);
       const fileName = (typeof msg === 'object' ? msg.fileName : '') || 'document';
-      try {
-        const { payload } = await buildMediaPayload(docUrl, '', { forceType: 'document', fileName });
-        content = payload;
-      } catch {
-        content = { document: { url: docUrl }, fileName };
-      }
+      try { const { payload } = await buildMediaPayload(docUrl, '', { forceType: 'document', fileName }); content = payload; } catch { content = { document: { url: docUrl }, fileName }; }
       textForLog = '[doc] ' + fileName;
-
     } else {
       content = typeof msg === 'string' ? msg : msg;
     }
@@ -731,7 +677,6 @@ router.post('/settings', (req, res) => {
   }
 });
 
-// --- AI CONFIG ENDPOINTS ---
 router.get('/ai-config', (req, res) => {
   const cfg = getConfig();
   res.json({
@@ -779,7 +724,6 @@ router.post('/ai-config', (req, res) => {
   }
 });
 
-// --- AI USAGE ---
 router.get('/ai-usage', (req, res) => {
   try { res.json(getUsageStats()); }
   catch (err) { res.status(500).json({ error: err.message }); }
