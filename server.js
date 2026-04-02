@@ -346,7 +346,7 @@ app.post('/send', auth, async (req,res) => {
   if (!dev.sock||dev.status!=='connected') return res.status(400).json({error:'No conectado'});
   try {
     const jid = to.includes('@s.whatsapp.net') ? to : to + '@s.whatsapp.net';
-    const result = await sock.sendMessage(jid, { text: message });
+    const result = await dev.sock.sendMessage(jid, { text: message });
     // Store sent message in waMessages so it shows in dashboard
     const arr = dev.waMessages.get(jid) || [];
     arr.push({ id: result.key.id, body: message, fromMe: true, ts: Date.now() });
@@ -379,6 +379,28 @@ app.post('/send-template', auth, async (req,res) => {
     await dev.sock.sendMessage(jid,{text:text||'',templateButtons:templateButtons||[]});
     res.json({ok:true});
   } catch(e) { res.status(500).json({error:e.message}); }
+});
+
+// ── Send list (interactive menu with rows – renders visually on personal WA) ──
+app.post('/send-list', auth, async (req,res) => {
+  const { to, text, footer, title, buttonText, sections, deviceId } = req.body;
+  const dev = getDevice(deviceId||'default');
+  if (!dev.sock||dev.status!=='connected') return res.status(400).json({error:'No conectado'});
+  try {
+    const jid = to.includes('@') ? to : to.replace(/\D/g,'') + '@s.whatsapp.net';
+    const result = await dev.sock.sendMessage(jid, {
+      text: text || '',
+      footer: footer || '',
+      title: title || '',
+      buttonText: buttonText || 'Ver opciones',
+      sections: sections || []
+    });
+    const arr = dev.waMessages.get(jid) || [];
+    arr.push({ id: result.key.id, body: '[Lista: ' + (buttonText||'Ver opciones') + ']', fromMe: true, ts: Date.now() });
+    if (arr.length > 500) arr.splice(0, arr.length - 500);
+    dev.waMessages.set(jid, arr);
+    res.json({ ok: true, messageId: result.key.id });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 // Ã¢ÂÂÃ¢ÂÂ Broadcast Ã¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂÃ¢ÂÂ
