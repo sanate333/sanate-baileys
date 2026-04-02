@@ -16,6 +16,11 @@ let initialSyncDone = false;
 const photoCache = new NodeCache({ stdTTL: 900, checkperiod: 120 });
 const contactCache = new NodeCache({ stdTTL: 3600, checkperiod: 300 });
 
+function normalizeJid(jid) {
+  if (!jid) return jid;
+  return jid.replace(/@s\.whatsapp\.net$/, '');
+}
+
 function getSocket() { return sock; }
 function getQR() { return qrCode; }
 function getConnectionState() { return connectionState; }
@@ -93,7 +98,10 @@ async function connectToWhatsApp() {
       if (isJidBroadcast(msg.key.remoteJid)) continue;
       if (msg.key.remoteJid === 'status@broadcast') continue;
 
+      if (msg.key.remoteJid && msg.key.remoteJid.endsWith('@lid')) continue;
       const chatId = msg.key.remoteJid;
+        const storageId = normalizeJid(chatId);
+      const storageId = normalizeJid(chatId);
       const fromMe = msg.key.fromMe || false;
       const isGroup = isJidGroup(chatId);
       const pushName = msg.pushName || null;
@@ -106,7 +114,7 @@ async function connectToWhatsApp() {
 
       console.log((fromMe ? '-> ' : '<- ') + senderName + ': ' + (messageText || '').substring(0, 50) + ' [' + messageType + ']');
 
-      await saveMessage(chatId, senderName, {
+      await saveMessage(storageId, senderName, {
         messageId: msg.key.id,
         text: messageText,
         type: messageType,
@@ -114,13 +122,13 @@ async function connectToWhatsApp() {
         timestamp: timestamp ? (typeof timestamp === 'object' ? timestamp.low : timestamp) : Math.floor(Date.now() / 1000)
       });
 
-      await upsertChat(chatId, senderName, messageText || '[' + messageType + ']',
+      await upsertChat(storageId, senderName, messageText || '[' + messageType + ']',
         typeof timestamp === 'object' ? timestamp.low : timestamp
       );
 
       if (sseManager) sseManager.broadcast({
         type: 'message',
-        data: { chatId, messageId: msg.key.id, pushName, senderName, text: messageText, messageType, fromMe, isGroup, timestamp: Date.now() }
+        data: { chatId: storageId, messageId: msg.key.id, pushName, senderName, text: messageText, messageType, fromMe, isGroup, timestamp: Date.now() }
       });
 
       // Auto-reply: only for incoming non-group text messages
@@ -152,7 +160,7 @@ async function connectToWhatsApp() {
         if (sseManager) sseManager.broadcast({
           type: 'message_status',
           data: {
-            chatId: key.remoteJid,
+            chatId: normalizeJid(key.remoteJid),
             messageId: key.id,
             fromMe: key.fromMe || false,
             status: update.status,
@@ -320,12 +328,13 @@ function getContactName(jid) {
 }
 
 async function sendMessage(chatId, content) {
+  const storageId = normalizeJid(chatId);
   if (!sock || connectionState !== 'connected') throw new Error('WhatsApp no esta conectado');
   const messagePayload = typeof content === 'string' ? { text: content } : content;
   const sent = await sock.sendMessage(chatId, messagePayload);
   const sentText = typeof content === 'string' ? content : (content.text || '[media]');
 
-  await saveMessage(chatId, 'Sanate Bot', {
+  await saveMessage(storageId, 'Sanate Bot', {
     messageId: sent.key.id,
     text: sentText,
     type: 'text',
@@ -333,11 +342,11 @@ async function sendMessage(chatId, content) {
     timestamp: Math.floor(Date.now() / 1000)
   });
 
-  await upsertChat(chatId, null, sentText, Math.floor(Date.now() / 1000));
+  await upsertChat(storageId, null, sentText, Math.floor(Date.now() / 1000));
 
   if (sseManager) sseManager.broadcast({
     type: 'message_sent',
-    data: { chatId, messageId: sent.key.id, text: sentText, timestamp: Date.now() }
+    data: { chatId: storageId, messageId: sent.key.id, text: sentText, timestamp: Date.now() }
   });
 
   return sent;
