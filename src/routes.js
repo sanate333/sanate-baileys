@@ -119,6 +119,13 @@ async function sendInteractiveMessageDirect(chatId, { buffer, contentType, media
   return wamsg;
 }
 
+// === HELPER: Normalizar JID para almacenamiento (evita chats duplicados) ===
+function normalizeStorageJid(jid) {
+  if (!jid) return jid;
+  // Quitar sufijo @s.whatsapp.net para almacenar siempre el numero limpio
+  return jid.replace(/@s\.whatsapp\.net$/, '');
+}
+
 // === HELPER: Construir lista de botones nativos desde el array del request ===
 function buildNativeButtons(buttons) {
   if (!buttons || !Array.isArray(buttons)) return [];
@@ -338,7 +345,7 @@ router.post('/chats/:chatId/send', async (req, res) => {
                 const btnText = buttons.map((b, i) => {
                   const label = b.buttonText?.displayText || b.text || b.label || b.title || ('Opcion ' + (i + 1));
                   const url = b.url || '';
-                  return url ? ('ð ' + label + ': ' + url) : ('â¶ ' + label);
+                  return url ? ('🔗 ' + label + ': ' + url) : ('▶ ' + label);
                 }).join('\n');
                 await sendMessage(chatId, { text: btnText + (footer ? '\n\n' + footer : '') }).catch(() => {});
               }
@@ -380,6 +387,32 @@ router.post('/chats/:chatId/send', async (req, res) => {
       upsertChat(chatId, chatName, textForLog, Date.now()).catch(() => {});
       return res.json({ ok: true, success: true, messageId: msgId, btnMethod });
 
+    } else if (type === 'list') {
+      // === LISTA INTERACTIVA: botones visuales reales en WhatsApp personal ===
+      const captionText = caption || (typeof message === 'string' ? message : '');
+      const btnLabel = req.body.buttonText || 'Ver opciones';
+      const sectionTitle = req.body.sectionTitle || 'Opciones';
+      const rows = (buttons || []).map((b, i) => {
+        const title = b.buttonText?.displayText || b.text || b.label || b.title || ('Opcion ' + (i + 1));
+        const id = b.id || title.toLowerCase().replace(/[^a-z0-9]/g, '_').substring(0, 20);
+        return { title, id, description: b.description || '' };
+      });
+      const listContent = {
+        text: captionText,
+        footer: footer || '',
+        title: req.body.listTitle || req.body.title || header || '',
+        buttonText: btnLabel,
+        sections: [{ title: sectionTitle, rows }]
+      };
+      const listResult = await sendMessage(chatId, listContent);
+      const listMsgId = listResult.key?.id;
+      const storageJidL = normalizeStorageJid(chatId);
+      const chatNameL = getContactName(chatId) || storageJidL.split('@')[0];
+      const logTextL = '[list] ' + captionText.substring(0, 50);
+      saveMessage(storageJidL, chatNameL, { messageId: listMsgId, fromMe: true, text: logTextL, type: 'list', timestamp: Date.now() }).catch(() => {});
+      upsertChat(storageJidL, chatNameL, logTextL, Date.now()).catch(() => {});
+      return res.json({ ok: true, success: true, messageId: listMsgId, btnMethod: 'list_message' });
+
     } else if (type === 'image') {
       const imgUrl = mediaUrl || (typeof message === 'object' ? message.url : message);
       const imgCaption = caption || (typeof message === 'object' ? message.caption : '');
@@ -419,9 +452,10 @@ router.post('/chats/:chatId/send', async (req, res) => {
 
     const result = await sendMessage(chatId, content);
     const msgId = result.key?.id || result.key;
-    const chatName = getContactName(chatId) || chatId.split('@')[0];
-    saveMessage(chatId, chatName, { messageId: msgId, fromMe: true, text: textForLog, type: type, timestamp: Date.now() }).catch(() => {});
-    upsertChat(chatId, chatName, textForLog, Date.now()).catch(() => {});
+    const storageJid = normalizeStorageJid(chatId);
+    const chatName = getContactName(chatId) || storageJid.split('@')[0];
+    saveMessage(storageJid, chatName, { messageId: msgId, fromMe: true, text: textForLog, type: type, timestamp: Date.now() }).catch(() => {});
+    upsertChat(storageJid, chatName, textForLog, Date.now()).catch(() => {});
     res.json({ ok: true, success: true, messageId: msgId });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -480,7 +514,7 @@ router.post('/send', async (req, res) => {
             // === METODO 2: sendMessage interactiveButtons ===
             try {
               content = mType === 'video'
-                ? { video: mediaBuffer, caption: captionText, mimetype: mediaContentType, gifPlayback: false, interactiveButtons: nativeButtons }
+                ? { video: mediaBuffer, caption: captionText, mimetype: mediaContentType, gifPlayback: false, interactiveButtons: nativeButtonLs }
                 : { image: mediaBuffer, caption: captionText, mimetype: mediaContentType, interactiveButtons: nativeButtons };
               result = await sendMessage(chatId, content);
               btnMethod = 'sendmsg_interactive';
@@ -496,7 +530,7 @@ router.post('/send', async (req, res) => {
                 const btnText = buttons.map((b, i) => {
                   const label = b.buttonText?.displayText || b.text || b.label || b.title || ('Opcion ' + (i + 1));
                   const url = b.url || '';
-                  return url ? ('ð ' + label + ': ' + url) : ('â¶ ' + label);
+                  return url ? ('🔗 ' + label + ': ' + url) : ('▶ ' + label);
                 }).join('\n');
                 await sendMessage(chatId, { text: btnText + (footer ? '\n\n' + footer : '') }).catch(() => {});
               }
@@ -531,10 +565,36 @@ router.post('/send', async (req, res) => {
         result = await sendMessage(chatId, content);
       }
 
-      const chatName = getContactName(chatId) || chatId.split('@')[0];
-      saveMessage(chatId, chatName, { messageId: result.key?.id, fromMe: true, text: textForLog, type: type, timestamp: Date.now() }).catch(() => {});
-      upsertChat(chatId, chatName, textForLog, Date.now()).catch(() => {});
+      const storageJidTP = normalizeStorageJid(chatId);
+      const chatNameTP = getContactName(chatId) || storageJidTP.split('@')[0];
+      saveMessage(storageJidTP, chatNameTP, { messageId: result.key?.id, fromMe: true, text: textForLog, type: type, timestamp: Date.now() }).catch(() => {});
+      upsertChat(storageJidTP, chatNameTP, textForLog, Date.now()).catch(() => {});
       return res.json({ success: true, messageId: result.key?.id, btnMethod });
+
+    } else if (type === 'list') {
+      // === LISTA INTERACTIVA: botones visuales reales en WhatsApp personal ===
+      const captionText = caption || (typeof msg === 'string' ? msg : '');
+      const btnLabel = req.body.buttonText || 'Ver opciones';
+      const sectionTitle = req.body.sectionTitle || 'Opciones';
+      const rows = (buttons || []).map((b, i) => {
+        const title = b.buttonText?.displayText || b.text || b.label || b.title || ('Opcion ' + (i + 1));
+        const id = b.id || title.toLowerCase().replace(/[^a-z0-9]/g, '_').substring(0, 20);
+        return { title, id, description: b.description || '' };
+      });
+      const listContent = {
+        text: captionText,
+        footer: footer || '',
+        title: req.body.listTitle || req.body.title || '',
+        buttonText: btnLabel,
+        sections: [{ title: sectionTitle, rows }]
+      };
+      const listResult = await sendMessage(chatId, listContent);
+      const storageJidList = normalizeStorageJid(chatId);
+      const chatNameList = getContactName(chatId) || storageJidList.split('@')[0];
+      const logTextList = '[list] ' + captionText.substring(0, 50);
+      saveMessage(storageJidList, chatNameList, { messageId: listResult.key?.id, fromMe: true, text: logTextList, type: 'list', timestamp: Date.now() }).catch(() => {});
+      upsertChat(storageJidList, chatNameList, logTextList, Date.now()).catch(() => {});
+      return res.json({ success: true, messageId: listResult.key?.id, btnMethod: 'list_message' });
 
     } else if (type === 'image') {
       const imgUrl = mediaUrl || (typeof msg === 'object' ? msg.url : msg);
@@ -574,9 +634,10 @@ router.post('/send', async (req, res) => {
     }
 
     const result = await sendMessage(chatId, content);
-    const chatName = getContactName(chatId) || chatId.split('@')[0];
-    saveMessage(chatId, chatName, { messageId: result.key?.id, fromMe: true, text: textForLog, type: type, timestamp: Date.now() }).catch(() => {});
-    upsertChat(chatId, chatName, textForLog, Date.now()).catch(() => {});
+    const storageJidFinal = normalizeStorageJid(chatId);
+    const chatName = getContactName(chatId) || storageJidFinal.split('@')[0];
+    saveMessage(storageJidFinal, chatName, { messageId: result.key?.id, fromMe: true, text: textForLog, type: type, timestamp: Date.now() }).catch(() => {});
+    upsertChat(storageJidFinal, chatName, textForLog, Date.now()).catch(() => {});
     res.json({ success: true, messageId: result.key?.id, btnMethod: 'none' });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -588,7 +649,7 @@ router.post('/disconnect', async (req, res) => {
 
 router.get('/settings', (req, res) => {
   res.json({
-    server: 'sanate-wa-server', version: '3.3.0', engine: 'baileys-standalone',
+    server: 'sanate-wa-server', version: '3.4.0', engine: 'baileys-standalone',
     connection: getConnectionState(), sse: req.app.get('sse')?.getStatus(),
     supabase: !!req.app.get('supabase'), uptime: Math.floor(process.uptime()),
     contacts: contactCache.keys().length
