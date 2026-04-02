@@ -1,8 +1,6 @@
 const express = require('express');
 const router = express.Router();
 const QRCode = require('qrcode');
-const multer = require('multer');
-const uploadNone = multer().none(); // parsea FormData sin archivos (solo campos de texto)
 const { getConnectionState, getQR, getProfilePhoto, getContactName, sendMessage, disconnect, getSocket, contactCache } = require('./baileys');
 const { getChats, getMessages, saveMessage, upsertChat } = require('./supabase');
 const { getConfig, setConfig, getUsageStats } = require('./auto-reply');
@@ -308,7 +306,7 @@ router.get('/events', (req, res) => {
 // POST /chats/:chatId/send  (dashboard sends)
 // Acepta tanto JSON como FormData (el dashboard envia FormData con campo "text")
 // =============================================
-router.post('/chats/:chatId/send', uploadNone, async (req, res) => {
+router.post('/chats/:chatId/send', async (req, res) => {
   try {
     const chatId = decodeURIComponent(req.params.chatId);
     // Soporta: JSON { message } o FormData { text }
