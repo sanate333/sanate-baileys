@@ -128,6 +128,23 @@ async function useSupabaseAuthState(supabase) {
   const { state, saveCreds: originalSaveCreds } = await useMultiFileAuthState(AUTH_DIR);
 
   // Step 3: Wrap saveCreds to also persist to Supabase
+  // Wrap keys.set para sincronizar sesiones Signal a Supabase en tiempo real
+  // Esto previene el error "Bad MAC" despues de reinicios del servidor
+  let _sessionSyncTimer = null;
+  const _originalKeysSet = state.keys.set.bind(state.keys);
+  state.keys.set = async (data) => {
+    await _originalKeysSet(data);
+    // Si hay cambios de sesion, sincronizar a Supabase (debounced 4s)
+    if (data && (data['session'] || data['sender-key'] || data['app-state-sync-key'])) {
+      clearTimeout(_sessionSyncTimer);
+      _sessionSyncTimer = setTimeout(() => {
+        saveAuthToSupabase(supabase).catch(err =>
+          console.error('[AUTH] Session sync error:', err.message)
+        );
+      }, 4000);
+    }
+  };
+
   const saveCreds = async () => {
     await originalSaveCreds();
     // Save to Supabase in background (don't await to avoid blocking)
