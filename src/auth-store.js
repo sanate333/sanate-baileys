@@ -85,6 +85,23 @@ async function saveAuthToSupabase(supabase) {
 }
 
 /**
+ * Clear only local auth files (keeps Supabase intact).
+ * Used when reconnecting after connectionReplaced (440) so the next
+ * useSupabaseAuthState() call reloads fresh keys from Supabase.
+ */
+async function clearLocalAuth() {
+  try {
+    if (existsSync(AUTH_DIR)) {
+      rmSync(AUTH_DIR, { recursive: true, force: true });
+    }
+    mkdirSync(AUTH_DIR, { recursive: true });
+    console.log('[AUTH] Auth local limpiada - se recargara desde Supabase en la proxima conexion');
+  } catch (err) {
+    console.error('[AUTH] Error limpiando auth local:', err.message);
+  }
+}
+
+/**
  * Clear auth from both filesystem and Supabase
  */
 async function clearAuth(supabase) {
@@ -156,4 +173,4 @@ async function useSupabaseAuthState(supabase) {
   return { state, saveCreds };
 }
 
-module.exports = { useSupabaseAuthState, clearAuth, saveAuthToSupabase, loadAuthFromSupabase };
+module.exports = { useSupabaseAuthState, clearAuth, clearLocalAuth, saveAuthToSupabase, loadAuthFromSupabase };

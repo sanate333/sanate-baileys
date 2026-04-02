@@ -3,7 +3,7 @@ const { Boom } = require('@hapi/boom');
 const pino = require('pino');
 const NodeCache = require('node-cache');
 const { saveMessage, upsertChat, syncInitialChats } = require('./supabase');
-const { useSupabaseAuthState, clearAuth, saveAuthToSupabase } = require('./auth-store');
+const { useSupabaseAuthState, clearAuth, clearLocalAuth, saveAuthToSupabase } = require('./auth-store');
 const { handleIncomingMessage, updateSocket } = require('./auto-reply');
 
 let sock = null;
@@ -73,8 +73,18 @@ async function connectToWhatsApp() {
       if (sseManager) sseManager.broadcast({ type: 'connection', data: { status: 'disconnected', reason } });
 
       if (reason !== DisconnectReason.loggedOut) {
-        console.log('Reconectando en 5 segundos...');
-        setTimeout(connectToWhatsApp, 5000);
+        if (reason === DisconnectReason.connectionReplaced) {
+          // Otra instancia reemplazó esta conexión (deploy solapado).
+          // Limpiamos auth local para que la próxima conexión recargue las
+          // claves más recientes de Supabase y evitemos el BAD MAC.
+          console.log('[440] Conexion reemplazada - limpiando sesion local para recargar claves frescas...');
+          await clearLocalAuth();
+          console.log('[440] Reconectando en 10 segundos con claves frescas...');
+          setTimeout(connectToWhatsApp, 10000);
+        } else {
+          console.log('Reconectando en 5 segundos...');
+          setTimeout(connectToWhatsApp, 5000);
+        }
       } else {
         console.log('Logout. Borrando sesion...');
         await clearAuth(supabaseClient);
@@ -102,32 +112,35 @@ async function connectToWhatsApp() {
       if (msg.key.remoteJid === 'status@broadcast') continue;
       if (msg.key.remoteJid && msg.key.remoteJid.endsWith('@lid')) continue;
 
-      // Si msg.message es null (session reset / prekey bundle), enviar un mensaje
-      // vacio para establecer la sesion Signal y permitir que el siguiente mensaje llegue
+      // Si msg.message es null: Bad MAC / sesion Signal corrupta.
+      // Registrar siempre para diagnóstico, y resetear sesion para cualquier tipo.
       if (!msg.message) {
-      if (!msg.key.fromMe && msg.key.remoteJid && type === 'notify') {
         const jid = msg.key.remoteJid;
-        console.log('[SESSION] Bad MAC / prekey bundle de', jid.split('@')[0], '- reseteando sesion Signal...');
-        // Eliminar sesion Signal corrupta para forzar nuevo intercambio de claves
-        try {
-          if (sock.authState && sock.authState.keys) {
-            await sock.authState.keys.set({ 'session': { [jid]: null } });
-            console.log('[SESSION] Sesion Signal eliminada para', jid.split('@')[0]);
-            saveAuthToSupabase(supabaseClient).catch(() => {});
+        console.log('[SESSION] Mensaje nulo de', jid ? jid.split('@')[0] : 'unknown', '| type=' + type, '| fromMe=' + msg.key.fromMe);
+        if (!msg.key.fromMe && jid) {
+          // Resetear la sesion Signal corrupta para este contacto
+          try {
+            if (sock.authState && sock.authState.keys) {
+              await sock.authState.keys.set({ 'session': { [jid]: null } });
+              console.log('[SESSION] Sesion Signal eliminada para', jid.split('@')[0]);
+              saveAuthToSupabase(supabaseClient).catch(() => {});
+            }
+          } catch (clearErr) {
+            console.log('[SESSION] Error limpiando sesion:', clearErr.message);
           }
-        } catch (clearErr) {
-          console.log('[SESSION] Error limpiando sesion:', clearErr.message);
+          // Para mensajes en tiempo real (notify), enviar zero-width space para forzar
+          // nuevo intercambio de claves Signal
+          if (type === 'notify') {
+            try {
+              await sock.sendMessage(jid, { text: '\u200b' });
+              console.log('[SESSION] Reset Signal enviado a', jid.split('@')[0], '- el proximo mensaje deberia llegar correctamente');
+            } catch (e) {
+              console.log('[SESSION] Error enviando reset:', e.message);
+            }
+          }
         }
-        // Enviar mensaje de reestablecimiento
-        try {
-          await sock.sendMessage(jid, { text: '​' });
-          console.log('[SESSION] Reset enviado a', jid.split('@')[0]);
-        } catch (e) {
-          console.log('[SESSION] Error en reset:', e.message);
-        }
+        continue;
       }
-      continue;
-    }
       const chatId = msg.key.remoteJid;
       const storageId = normalizeJid(chatId);
       const fromMe = msg.key.fromMe || false;
