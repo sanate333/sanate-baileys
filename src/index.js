@@ -90,3 +90,30 @@ start().catch(err => {
   console.error('Error fatal:', err);
   process.exit(1);
 });
+
+// === MANEJO DE SEÃALES (evita crash cuando Render reinicia el contenedor) ===
+async function gracefulShutdown(signal) {
+  console.log('[Shutdown] SeÃ±al ' + signal + ' recibida - cerrando limpiamente...');
+  if (keepAliveTimer) clearInterval(keepAliveTimer);
+  server.close(() => {
+    console.log('[Shutdown] Servidor HTTP cerrado. Saliendo.');
+    process.exit(0);
+  });
+  // Forzar salida si el cierre tarda mÃ¡s de 8 segundos
+  setTimeout(() => {
+    console.log('[Shutdown] Timeout - forzando salida.');
+    process.exit(0);
+  }, 8000);
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
+
+// === PROTECCIÃN CONTRA CRASHES SILENCIOSOS ===
+process.on('uncaughtException', (err) => {
+  console.error('[UncaughtException] Error no capturado (bot sigue corriendo):', err.message);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[UnhandledRejection] Promesa sin manejar (bot sigue corriendo):', reason);
+});
