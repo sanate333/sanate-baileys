@@ -5,6 +5,53 @@ const { getConnectionState, getQR, getProfilePhoto, getContactName, sendMessage,
 const { getChats, getMessages, saveMessage, upsertChat } = require('./supabase');
 const { getConfig, setConfig, getUsageStats } = require('./auto-reply');
 
+// === HELPER: Descargar media como Buffer (mas confiable que pasar URL a Baileys) ===
+async function downloadMediaBuffer(url) {
+  const resp = await fetch(url, {
+    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; SanateBot/1.0)' },
+    redirect: 'follow'
+  });
+  if (!resp.ok) throw new Error('No se pudo descargar media: HTTP ' + resp.status);
+  const contentType = resp.headers.get('content-type') || '';
+  const buffer = Buffer.from(await resp.arrayBuffer());
+  return { buffer, contentType };
+}
+
+// === HELPER: Detectar tipo de media por URL y content-type ===
+function detectMediaType(url, contentType) {
+  const urlLower = (url || '').toLowerCase();
+  const ctLower = (contentType || '').toLowerCase();
+  if (ctLower.includes('video/') || urlLower.match(/\.(mp4|mov|avi|mkv|webm|3gp)(\?|$)/)) return 'video';
+  if (ctLower.includes('image/') || urlLower.match(/\.(jpg|jpeg|png|gif|webp|bmp|svg)(\?|$)/)) return 'image';
+  if (ctLower.includes('application/pdf') || urlLower.match(/\.(pdf|doc|docx|xls|xlsx)(\?|$)/)) return 'document';
+  return 'image'; // default a imagen
+}
+
+// === HELPER: Construir payload de media para Baileys ===
+async function buildMediaPayload(mediaUrl, captionText, options = {}) {
+  const { buffer, contentType } = await downloadMediaBuffer(mediaUrl);
+  const mediaType = options.forceType || detectMediaType(mediaUrl, contentType);
+
+  if (mediaType === 'video') {
+    return {
+      payload: { video: buffer, caption: captionText || '', mimetype: contentType || 'video/mp4', gifPlayback: false },
+      mediaType: 'video'
+    };
+  } else if (mediaType === 'document') {
+    const fileName = options.fileName || mediaUrl.split('/').pop().split('?')[0] || 'document';
+    return {
+      payload: { document: buffer, caption: captionText || '', mimetype: contentType || 'application/octet-stream', fileName },
+      mediaType: 'document'
+    };
+  } else {
+    // Imagen (default)
+    return {
+      payload: { image: buffer, caption: captionText || '', mimetype: contentType || 'image/jpeg' },
+      mediaType: 'image'
+    };
+  }
+}
+
 // Middleware: parse multipart/form-data text fields (no external deps)
 function parseMultipart(req, res, next) {
   const ct = req.headers['content-type'] || '';
@@ -132,6 +179,9 @@ router.get('/events', (req, res) => {
   sse.addClient(req, res);
 });
 
+// =============================================
+// POST /chats/:chatId/send  (dashboard sends)
+// =============================================
 router.post('/chats/:chatId/send', async (req, res) => {
   try {
     const chatId = decodeURIComponent(req.params.chatId);
@@ -142,32 +192,83 @@ router.post('/chats/:chatId/send', async (req, res) => {
     let textForLog = typeof message === 'string' ? message : message.caption || '';
 
     if (type === 'template_pro') {
-      // Plantilla Pro: supports image + text + buttons
+      // === PLANTILLA PRO: imagen/video + caption + botones ===
       const results = [];
       if (mediaUrl) {
-        // Send image with caption text
-        const imgContent = { image: { url: mediaUrl }, caption: typeof message === 'string' ? message : '' };
-        const imgResult = await sendMessage(chatId, imgContent);
-        results.push(imgResult);
-        textForLog = '[img] ' + (typeof message === 'string' ? message.substring(0, 60) : '');
+        const captionText = caption || (typeof message === 'string' ? message : '');
+        try {
+          const { payload, mediaType } = await buildMediaPayload(mediaUrl, captionText);
+          const mediaResult = await sendMessage(chatId, payload);
+          results.push(mediaResult);
+          textForLog = '[' + mediaType + '] ' + (captionText || '').substring(0, 60);
+        } catch (mediaErr) {
+          console.error('[TemplatePro] Error descargando media:', mediaErr.message);
+          // Fallback: intentar con URL directa
+          const fallbackPayload = { image: { url: mediaUrl }, caption: captionText };
+          const fallbackResult = await sendMessage(chatId, fallbackPayload);
+          results.push(fallbackResult);
+          textForLog = '[img-url] ' + (captionText || '').substring(0, 60);
+        }
       } else {
-        // No image â send as text
         const txtContent = { text: typeof message === 'string' ? message : '' };
         const txtResult = await sendMessage(chatId, txtContent);
         results.push(txtResult);
       }
+
+      // Enviar botones como mensaje separado si existen
+      if (buttons && Array.isArray(buttons) && buttons.length > 0) {
+        try {
+          const btnText = buttons.map((b, i) => {
+            const label = b.buttonText?.displayText || b.text || b.label || b.title || ('Opcion ' + (i + 1));
+            const url = b.url || '';
+            return url ? (label + ': ' + url) : ('> ' + label);
+          }).join('\n');
+          const footerText = footer ? ('\n\n' + footer) : '';
+          await sendMessage(chatId, { text: btnText + footerText });
+        } catch (btnErr) {
+          console.error('[TemplatePro] Error enviando botones:', btnErr.message);
+        }
+      }
+
       const msgId = results[0].key.id || results[0].key;
       const chatName = getContactName(chatId) || chatId.split('@')[0];
       saveMessage(chatId, chatName, { messageId: msgId, fromMe: true, text: textForLog, type: type, timestamp: Date.now() }).catch(() => {});
       upsertChat(chatId, chatName, textForLog, Date.now()).catch(() => {});
       return res.json({ ok: true, success: true, messageId: msgId, sent: results.length });
+
     } else if (type === 'image') {
       const imgUrl = mediaUrl || (typeof message === 'object' ? message.url : message);
       const imgCaption = caption || (typeof message === 'object' ? message.caption : '');
-      content = { image: { url: imgUrl }, caption: imgCaption };
+      try {
+        const { payload } = await buildMediaPayload(imgUrl, imgCaption, { forceType: 'image' });
+        content = payload;
+      } catch {
+        content = { image: { url: imgUrl }, caption: imgCaption };
+      }
       textForLog = imgCaption || '[imagen]';
+
+    } else if (type === 'video') {
+      const vidUrl = mediaUrl || (typeof message === 'object' ? message.url : message);
+      const vidCaption = caption || (typeof message === 'object' ? message.caption : '');
+      try {
+        const { payload } = await buildMediaPayload(vidUrl, vidCaption, { forceType: 'video' });
+        content = payload;
+      } catch {
+        content = { video: { url: vidUrl }, caption: vidCaption };
+      }
+      textForLog = vidCaption || '[video]';
+
     } else if (type === 'document') {
-      content = { document: { url: message.url }, fileName: message.fileName };
+      const docUrl = mediaUrl || (typeof message === 'object' ? message.url : message);
+      const fileName = (typeof message === 'object' ? message.fileName : '') || 'document';
+      try {
+        const { payload } = await buildMediaPayload(docUrl, '', { forceType: 'document', fileName });
+        content = payload;
+      } catch {
+        content = { document: { url: docUrl }, fileName };
+      }
+      textForLog = '[doc] ' + fileName;
+
     } else {
       content = { text: typeof message === 'string' ? message : JSON.stringify(message) };
     }
@@ -183,34 +284,88 @@ router.post('/chats/:chatId/send', async (req, res) => {
   }
 });
 
+// =============================================
+// POST /send  (API directa)
+// =============================================
 router.post('/send', async (req, res) => {
   try {
-    const { chatId, message, text, type = 'text', mediaUrl, caption } = req.body;
+    const { chatId, message, text, type = 'text', mediaUrl, caption, footer, buttons } = req.body;
     const msg = message || text;
     if (!chatId || !msg) return res.status(400).json({ error: 'chatId y message son requeridos' });
     let content;
     let textForLog = typeof msg === 'string' ? msg : msg.caption || '';
 
     if (type === 'template_pro') {
-      // Plantilla Pro: image + text
+      // === PLANTILLA PRO: imagen/video + caption + botones ===
       if (mediaUrl) {
-        content = { image: { url: mediaUrl }, caption: typeof msg === 'string' ? msg : '' };
-        textForLog = '[img] ' + (typeof msg === 'string' ? msg.substring(0, 60) : '');
+        const captionText = caption || (typeof msg === 'string' ? msg : '');
+        try {
+          const { payload, mediaType } = await buildMediaPayload(mediaUrl, captionText);
+          content = payload;
+          textForLog = '[' + mediaType + '] ' + (captionText || '').substring(0, 60);
+        } catch (mediaErr) {
+          console.error('[TemplatePro] Error descargando media:', mediaErr.message);
+          content = { image: { url: mediaUrl }, caption: captionText };
+          textForLog = '[img-url] ' + (captionText || '').substring(0, 60);
+        }
       } else {
         content = { text: typeof msg === 'string' ? msg : '' };
       }
+
     } else if (type === 'image') {
       const imgUrl = mediaUrl || (typeof msg === 'object' ? msg.url : msg);
       const imgCaption = caption || (typeof msg === 'object' ? msg.caption : '');
-      content = { image: { url: imgUrl }, caption: imgCaption };
+      try {
+        const { payload } = await buildMediaPayload(imgUrl, imgCaption, { forceType: 'image' });
+        content = payload;
+      } catch {
+        content = { image: { url: imgUrl }, caption: imgCaption };
+      }
       textForLog = imgCaption || '[imagen]';
+
+    } else if (type === 'video') {
+      const vidUrl = mediaUrl || (typeof msg === 'object' ? msg.url : msg);
+      const vidCaption = caption || (typeof msg === 'object' ? msg.caption : '');
+      try {
+        const { payload } = await buildMediaPayload(vidUrl, vidCaption, { forceType: 'video' });
+        content = payload;
+      } catch {
+        content = { video: { url: vidUrl }, caption: vidCaption };
+      }
+      textForLog = vidCaption || '[video]';
+
     } else if (type === 'document') {
-      content = { document: { url: msg.url }, fileName: msg.fileName };
+      const docUrl = mediaUrl || (typeof msg === 'object' ? msg.url : msg);
+      const fileName = (typeof msg === 'object' ? msg.fileName : '') || 'document';
+      try {
+        const { payload } = await buildMediaPayload(docUrl, '', { forceType: 'document', fileName });
+        content = payload;
+      } catch {
+        content = { document: { url: docUrl }, fileName };
+      }
+      textForLog = '[doc] ' + fileName;
+
     } else {
       content = typeof msg === 'string' ? msg : msg;
     }
 
     const result = await sendMessage(chatId, content);
+
+    // Enviar botones como mensaje aparte si existen
+    if (type === 'template_pro' && buttons && Array.isArray(buttons) && buttons.length > 0) {
+      try {
+        const btnText = buttons.map((b, i) => {
+          const label = b.buttonText?.displayText || b.text || b.label || b.title || ('Opcion ' + (i + 1));
+          const url = b.url || '';
+          return url ? (label + ': ' + url) : ('> ' + label);
+        }).join('\n');
+        const footerText = footer ? ('\n\n' + footer) : '';
+        await sendMessage(chatId, { text: btnText + footerText });
+      } catch (btnErr) {
+        console.error('[TemplatePro] Error enviando botones:', btnErr.message);
+      }
+    }
+
     const chatName = getContactName(chatId) || chatId.split('@')[0];
     saveMessage(chatId, chatName, { messageId: result.key.id, fromMe: true, text: textForLog, type: type, timestamp: Date.now() }).catch(() => {});
     upsertChat(chatId, chatName, textForLog, Date.now()).catch(() => {});
@@ -225,7 +380,7 @@ router.post('/disconnect', async (req, res) => {
 
 router.get('/settings', (req, res) => {
   res.json({
-    server: 'sanate-wa-server', version: '3.0.0', engine: 'baileys-standalone',
+    server: 'sanate-wa-server', version: '3.1.0', engine: 'baileys-standalone',
     connection: getConnectionState(), sse: req.app.get('sse')?.getStatus(),
     supabase: !!req.app.get('supabase'), uptime: Math.floor(process.uptime()),
     contacts: contactCache.keys().length
@@ -271,7 +426,6 @@ router.post('/settings', (req, res) => {
 });
 
 // --- AI CONFIG ENDPOINTS ---
-// GET returns FULL config so ANY browser/PC can load it
 router.get('/ai-config', (req, res) => {
   const cfg = getConfig();
   res.json({
@@ -280,7 +434,7 @@ router.get('/ai-config', (req, res) => {
     claudeKey: cfg.claudeKey || '',
     openaiKey: cfg.openaiKey || '',
     systemPrompt: cfg.systemPrompt || '',
-      companyContext: cfg.companyContext || '',
+    companyContext: cfg.companyContext || '',
     contactMap: cfg.contactMap || {},
     botDelay: cfg.botDelay,
     msgMode: cfg.msgMode,
@@ -322,7 +476,8 @@ router.post('/ai-config', (req, res) => {
 // --- AI USAGE ---
 router.get('/ai-usage', (req, res) => {
   try { res.json(getUsageStats()); }
-  catch (err) { res.status(500).json({ error: err.message }); }
+  catch (err) { res.status(500).json({ error: err.message });
+}
 });
 
 module.exports = router;
