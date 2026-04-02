@@ -183,6 +183,7 @@ async function runInitialSync() {
 
     const processMsg = (msg) => {
       if (!msg.message || !msg.key?.remoteJid) return;
+      if (msg.key.remoteJid.endsWith('@lid')) return;
       if (msg.key.remoteJid === 'status@broadcast') return;
       if (isJidBroadcast(msg.key.remoteJid)) return;
 
@@ -214,6 +215,7 @@ async function runInitialSync() {
       console.log('HISTORY EVENT: ' + (hMsgs?.length || 0) + ' msgs, ' + (hChats?.length || 0) + ' chats, isLatest=' + isLatest);
       if (hContacts) {
         for (const c of hContacts) {
+          if (c.id && c.id.endsWith('@lid')) continue;
           if (c.id && c.notify) contactCache.set(c.id, c.notify);
         }
       }
