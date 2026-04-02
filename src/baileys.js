@@ -105,17 +105,29 @@ async function connectToWhatsApp() {
       // Si msg.message es null (session reset / prekey bundle), enviar un mensaje
       // vacio para establecer la sesion Signal y permitir que el siguiente mensaje llegue
       if (!msg.message) {
-        if (!msg.key.fromMe && msg.key.remoteJid && type === 'notify') {
-          const jid = msg.key.remoteJid;
-          console.log('[SESSION] Prekey bundle de', jid.split('@')[0], '- estableciendo sesion...');
-          try {
-            await sock.sendMessage(jid, { text: '\u200b' }); // zero-width space para establecer sesion
-          } catch (e) {
-            console.log('[SESSION] Error estableciendo sesion:', e.message);
+      if (!msg.key.fromMe && msg.key.remoteJid && type === 'notify') {
+        const jid = msg.key.remoteJid;
+        console.log('[SESSION] Bad MAC / prekey bundle de', jid.split('@')[0], '- reseteando sesion Signal...');
+        // Eliminar sesion Signal corrupta para forzar nuevo intercambio de claves
+        try {
+          if (sock.authState && sock.authState.keys) {
+            await sock.authState.keys.set({ 'session': { [jid]: null } });
+            console.log('[SESSION] Sesion Signal eliminada para', jid.split('@')[0]);
+            saveAuthToSupabase(supabaseClient).catch(() => {});
           }
+        } catch (clearErr) {
+          console.log('[SESSION] Error limpiando sesion:', clearErr.message);
         }
-        continue;
+        // Enviar mensaje de reestablecimiento
+        try {
+          await sock.sendMessage(jid, { text: '​' });
+          console.log('[SESSION] Reset enviado a', jid.split('@')[0]);
+        } catch (e) {
+          console.log('[SESSION] Error en reset:', e.message);
+        }
       }
+      continue;
+    }
       const chatId = msg.key.remoteJid;
       const storageId = normalizeJid(chatId);
       const fromMe = msg.key.fromMe || false;
