@@ -109,10 +109,14 @@ async function connectToWhatsApp() {
   });
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    // DEBUG: log every upsert event to diagnose missing incoming messages
+    console.log('[UPSERT] type=' + type + ' count=' + messages.length);
     for (const msg of messages) {
+      const rjid = msg.key.remoteJid || 'null';
+      console.log('[MSG] jid=' + rjid + ' fromMe=' + msg.key.fromMe + ' hasMsg=' + !!msg.message);
       if (isJidBroadcast(msg.key.remoteJid)) continue;
       if (msg.key.remoteJid === 'status@broadcast') continue;
-      if (msg.key.remoteJid && msg.key.remoteJid.endsWith('@lid')) continue;
+      // NOTE: removed @lid filter — some real contacts use @lid JIDs in newer WA versions
 
       // Si msg.message es null: Bad MAC / sesion Signal corrupta.
       // Registrar siempre para diagnóstico, y resetear sesion para cualquier tipo.
