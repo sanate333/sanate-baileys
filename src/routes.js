@@ -500,6 +500,34 @@ router.post('/chats/:chatId/send', async (req, res) => {
       upsertChat(storageJidL, chatNameL, logTextL, Date.now()).catch(() => {});
       return res.json({ ok: true, success: true, messageId: listMsgId, btnMethod: 'list_message' });
 
+    } else if (type === 'buttons') {
+      // === BOTONES INTERACTIVOS (solo texto, sin media) ===
+      const captionText = caption || (typeof message === 'string' ? message : '');
+      const nativeButtons = buildNativeButtons(buttons);
+      textForLog = '[btn] ' + captionText.substring(0, 50);
+      let btnResult;
+      let btnMethod = 'none';
+      try {
+        btnResult = await sendInteractiveMessageDirect(chatId, {
+          buffer: null,
+          captionText,
+          footerText: footer || '',
+          nativeButtons
+        });
+        btnMethod = 'relay_interactive';
+        console.log('[Buttons] relayMessage OK, botones:', nativeButtons.length);
+      } catch (e) {
+        console.error('[Buttons] relay fallo:', e.message, '- fallback texto');
+        btnResult = await sendMessage(chatId, { text: captionText });
+        btnMethod = 'text_fallback';
+      }
+      const btnMsgId = btnResult.key?.id;
+      const storageJidB = normalizeStorageJid(chatId);
+      const chatNameB = getContactName(chatId) || storageJidB.split('@')[0];
+      saveMessage(storageJidB, chatNameB, { messageId: btnMsgId, fromMe: true, text: textForLog, type: 'buttons', timestamp: Date.now() }).catch(() => {});
+      upsertChat(storageJidB, chatNameB, textForLog, Date.now()).catch(() => {});
+      return res.json({ ok: true, success: true, messageId: btnMsgId, btnMethod });
+
     } else if (type === 'image') {
       const imgUrl = mediaUrl || (typeof message === 'object' ? message.url : message);
       const imgCaption = caption || (typeof message === 'object' ? message.caption : '');
