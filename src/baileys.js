@@ -75,12 +75,14 @@ async function connectToWhatsApp() {
       if (reason !== DisconnectReason.loggedOut) {
         if (reason === DisconnectReason.connectionReplaced) {
           // Otra instancia reemplazó esta conexión (deploy solapado).
-          // Limpiamos auth local para que la próxima conexión recargue las
-          // claves más recientes de Supabase y evitemos el BAD MAC.
-          console.log('[440] Conexion reemplazada - limpiando sesion local para recargar claves frescas...');
-          await clearLocalAuth();
-          console.log('[440] Reconectando en 10 segundos con claves frescas...');
-          setTimeout(connectToWhatsApp, 10000);
+          // NO reconectar — si reconectamos causamos otro 440 fight que corrompe
+          // la sesión Signal. En su lugar, salimos limpiamente y dejamos que
+          // Render reinicie este proceso UNA sola vez ya sin conflicto.
+          console.log('[440] Conexion reemplazada - cerrando proceso para evitar conflicto de sesion...');
+          setTimeout(() => {
+            console.log('[440] Saliendo - la nueva instancia es la activa.');
+            process.exit(0);
+          }, 3000);
         } else {
           console.log('Reconectando en 5 segundos...');
           setTimeout(connectToWhatsApp, 5000);
