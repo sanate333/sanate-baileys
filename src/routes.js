@@ -69,7 +69,6 @@ async function buildMediaPayload(mediaUrl, captionText, options = {}) {
 // Sin estos nodos binarios (interactive, biz, bot), los botones se envian pero NO se renderizan en el telefono
 function buildInteractiveNodes(buttons, jid) {
   const buttonTypes = (buttons || []).map(b => b.name);
-  const isPrivate = !jid.endsWith('@g.us');
   const hasUrls = buttonTypes.includes('cta_url');
   const hasQuickReply = buttonTypes.includes('quick_reply');
   const hasSelect = buttonTypes.includes('single_select');
@@ -79,16 +78,22 @@ function buildInteractiveNodes(buttons, jid) {
     : hasUrls ? 'cta_url'
     : 'quick_reply';
 
-  const nodes = [
+  // NESTED: biz > interactive > native_flow (estructura correcta para delivery al dispositivo)
+  return [
     {
-      tag: 'interactive',
-      attrs: { type: 'native_flow', v: '1' },
-      content: [{ tag: 'native_flow', attrs: { v: '9', name: flowName } }]
-    },
-    { tag: 'biz', attrs: {} }
+      tag: 'biz',
+      attrs: {},
+      content: [
+        {
+          tag: 'interactive',
+          attrs: { type: 'native_flow', v: '1' },
+          content: [
+            { tag: 'native_flow', attrs: { name: flowName, v: '9' } }
+          ]
+        }
+      ]
+    }
   ];
-  if (isPrivate) nodes.push({ tag: 'bot', attrs: { biz_bot: '1' } });
-  return nodes;
 }
 
 // === HELPER PRINCIPAL: Enviar mensaje interactivo con proto directo ===
@@ -201,22 +206,23 @@ function normalizeStorageJid(jid) {
 // === HELPER: Construir lista de botones nativos desde el array del request ===
 function buildNativeButtons(buttons) {
   if (!buttons || !Array.isArray(buttons)) return [];
-  return buttons.map(b => {
-    const label = b.buttonText?.displayText || b.text || b.label || b.title || 'Opcion';
+  return buttons.map((b, i) => {
+    // Si ya viene en formato nativo { name, buttonParamsJson } → pasar directo
+    if ((b.name === 'quick_reply' || b.name === 'cta_url' || b.name === 'single_select') && b.buttonParamsJson) {
+      return { name: b.name, buttonParamsJson: b.buttonParamsJson };
+    }
+    // Extraer label e id del buttonParamsJson si existe
+    let label = b.buttonText?.displayText || b.text || b.label || b.title;
+    let id = b.id;
+    if (!label && b.buttonParamsJson) {
+      try { const p = JSON.parse(b.buttonParamsJson); label = p.display_text; if (!id) id = p.id; } catch(e) {}
+    }
+    label = label || ('Opcion ' + (i + 1));
     const btnUrl = b.url || '';
     if (btnUrl) {
-      return {
-        name: 'cta_url',
-        buttonParamsJson: JSON.stringify({ display_text: label, url: btnUrl, merchant_url: btnUrl })
-      };
+      return { name: 'cta_url', buttonParamsJson: JSON.stringify({ display_text: label, url: btnUrl, merchant_url: btnUrl }) };
     } else {
-      return {
-        name: 'quick_reply',
-        buttonParamsJson: JSON.stringify({
-          display_text: label,
-          id: b.id || label.toLowerCase().replace(/\s+/g, '_')
-        })
-      };
+      return { name: 'quick_reply', buttonParamsJson: JSON.stringify({ display_text: label, id: id || label.toLowerCase().replace(/\s+/g, '_') }) };
     }
   });
 }
@@ -503,24 +509,49 @@ router.post('/chats/:chatId/send', async (req, res) => {
     } else if (type === 'buttons') {
       // === BOTONES INTERACTIVOS (solo texto, sin media) ===
       const captionText = caption || (typeof message === 'string' ? message : '');
-      const nativeButtons = buildNativeButtons(buttons);
       textForLog = '[btn] ' + captionText.substring(0, 50);
+
+      // Construir array de botones en formato legacy (buttonsMessage)
+      const legacyBtns = (buttons || []).map((b, i) => {
+        let label = b.buttonText?.displayText || b.text || b.label || b.title;
+        let btnId = b.id;
+        if (b.buttonParamsJson) {
+          try { const p = JSON.parse(b.buttonParamsJson); if (!label) label = p.display_text; if (!btnId) btnId = p.id; } catch(e) {}
+        }
+        label = label || ('Opcion ' + (i + 1));
+        return { buttonId: btnId || ('btn_' + i), buttonText: { displayText: label }, type: 1 };
+      });
+
       let btnResult;
       let btnMethod = 'none';
+
+      // METODO 1: buttonsMessage (legacy, mejor delivery en cuentas personales)
       try {
-        btnResult = await sendInteractiveMessageDirect(chatId, {
-          buffer: null,
-          captionText,
-          footerText: footer || '',
-          nativeButtons
+        btnResult = await sendMessage(chatId, {
+          text: captionText,
+          footer: footer || '',
+          buttons: legacyBtns,
+          headerType: 1
         });
-        btnMethod = 'relay_interactive';
-        console.log('[Buttons] relayMessage OK, botones:', nativeButtons.length);
-      } catch (e) {
-        console.error('[Buttons] relay fallo:', e.message, '- fallback texto');
-        btnResult = await sendMessage(chatId, { text: captionText });
-        btnMethod = 'text_fallback';
+        btnMethod = 'buttons_msg';
+        console.log('[Buttons] buttonsMessage OK:', legacyBtns.length, 'botones');
+      } catch (e1) {
+        console.error('[Buttons] buttonsMessage fallo:', e1.message, '- intentando native_flow');
+        // METODO 2: nativeFlowMessage con additionalNodes anidados
+        const nativeButtons = buildNativeButtons(buttons);
+        try {
+          btnResult = await sendInteractiveMessageDirect(chatId, {
+            buffer: null, captionText, footerText: footer || '', nativeButtons
+          });
+          btnMethod = 'relay_interactive';
+          console.log('[Buttons] relay_interactive OK:', nativeButtons.length, 'botones');
+        } catch (e2) {
+          console.error('[Buttons] relay fallo:', e2.message, '- fallback texto');
+          btnResult = await sendMessage(chatId, { text: captionText });
+          btnMethod = 'text_fallback';
+        }
       }
+
       const btnMsgId = btnResult.key?.id;
       const storageJidB = normalizeStorageJid(chatId);
       const chatNameB = getContactName(chatId) || storageJidB.split('@')[0];
