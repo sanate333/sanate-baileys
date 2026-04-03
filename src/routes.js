@@ -65,8 +65,34 @@ async function buildMediaPayload(mediaUrl, captionText, options = {}) {
   }
 }
 
+// === HELPER: Construir additionalNodes requeridos por WhatsApp para renderizar botones ===
+// Sin estos nodos binarios (interactive, biz, bot), los botones se envian pero NO se renderizan en el telefono
+function buildInteractiveNodes(buttons, jid) {
+  const buttonTypes = (buttons || []).map(b => b.name);
+  const isPrivate = !jid.endsWith('@g.us');
+  const hasUrls = buttonTypes.includes('cta_url');
+  const hasQuickReply = buttonTypes.includes('quick_reply');
+  const hasSelect = buttonTypes.includes('single_select');
+
+  const flowName = hasSelect ? 'single_select'
+    : (hasUrls && hasQuickReply) ? 'mixed'
+    : hasUrls ? 'cta_url'
+    : 'quick_reply';
+
+  const nodes = [
+    {
+      tag: 'interactive',
+      attrs: { type: 'native_flow', v: '1' },
+      content: [{ tag: 'native_flow', attrs: { v: '9', name: flowName } }]
+    },
+    { tag: 'biz', attrs: {} }
+  ];
+  if (isPrivate) nodes.push({ tag: 'bot', attrs: { biz_bot: '1' } });
+  return nodes;
+}
+
 // === HELPER PRINCIPAL: Enviar mensaje interactivo con proto directo ===
-// Usa generateWAMessageFromContent + relayMessage para nativeFlowMessage (botones reales)
+// Usa generateWAMessageFromContent + relayMessage + additionalNodes (REQUERIDO para botones reales)
 async function sendInteractiveMessageDirect(chatId, { buffer, contentType, mediaType, captionText, footerText, nativeButtons }) {
   const sock = getSocket();
   if (!sock) throw new Error('Socket de WhatsApp no disponible');
@@ -75,7 +101,6 @@ async function sendInteractiveMessageDirect(chatId, { buffer, contentType, media
   const { generateWAMessageFromContent, prepareWAMessageMedia } = getBaileysFns();
   if (!generateWAMessageFromContent) throw new Error('generateWAMessageFromContent no disponible');
 
-  // Normalizar JID
   const jid = chatId.includes('@') ? chatId : chatId + '@s.whatsapp.net';
 
   // Construir header con media subida a los servidores de WhatsApp
@@ -87,16 +112,12 @@ async function sendInteractiveMessageDirect(chatId, { buffer, contentType, media
       : { image: buffer, mimetype: contentType || 'image/jpeg' };
 
     const uploaded = await prepareWAMessageMedia(mediaPayload, { upload: sock.waUploadToServer });
-
     header = {
-      ...(isVideo
-        ? { videoMessage: uploaded.videoMessage }
-        : { imageMessage: uploaded.imageMessage }),
+      ...(isVideo ? { videoMessage: uploaded.videoMessage } : { imageMessage: uploaded.imageMessage }),
       hasMediaAttachment: true
     };
   }
 
-  // Construir interactiveMessage con nativeFlowMessage (botones reales)
   const msgContent = {
     interactiveMessage: {
       header,
@@ -114,33 +135,60 @@ async function sendInteractiveMessageDirect(chatId, { buffer, contentType, media
     userJid: sock.user?.id || jid
   });
 
-  await sock.relayMessage(jid, wamsg.message, { messageId: wamsg.key.id });
+  // CRITICO: additionalNodes son los nodos binarios que WhatsApp requiere para renderizar botones
+  const additionalNodes = buildInteractiveNodes(nativeButtons, jid);
+  await sock.relayMessage(jid, wamsg.message, { messageId: wamsg.key.id, additionalNodes });
   return wamsg;
 }
 
-// === HELPER: Enviar lista interactiva ===
-// Usa sock.sendMessage (alto nivel) para que maneje establecimiento de sesion Signal Protocol
+// === HELPER: Enviar lista interactiva con single_select nativeFlowMessage ===
+// Usa generateWAMessageFromContent + relayMessage + additionalNodes (mismo patron que botones)
 async function sendListMessageDirect(chatId, { captionText, footerText, headerTitle, buttonText, sections }) {
   const sock = getSocket();
   if (!sock) throw new Error('Socket de WhatsApp no disponible');
+  const { generateWAMessageFromContent } = getBaileysFns();
+  if (!generateWAMessageFromContent) throw new Error('generateWAMessageFromContent no disponible');
+
   const jid = chatId.includes('@') ? chatId : chatId + '@s.whatsapp.net';
-  const mappedSections = sections.map(s => ({
+
+  // Convertir secciones al formato que espera single_select
+  const selectSections = sections.map(s => ({
     title: s.title || '',
     rows: (s.rows || []).map((r, i) => ({
-      rowId: r.rowId || r.id || ('row_' + i),
+      id: r.rowId || r.id || ('row_' + i),
       title: r.title || '',
       description: r.description || ''
     }))
   }));
-  // sock.sendMessage maneja la sesion Signal Protocol automaticamente (a diferencia de relayMessage)
-  const sent = await sock.sendMessage(jid, {
-    text: captionText || '',
-    footer: footerText || '',
-    title: headerTitle || '',
-    buttonText: buttonText || 'Ver opciones',
-    sections: mappedSections
+
+  const singleSelectButton = {
+    name: 'single_select',
+    buttonParamsJson: JSON.stringify({
+      title: buttonText || 'Ver opciones',
+      sections: selectSections
+    })
+  };
+
+  const msgContent = {
+    interactiveMessage: {
+      header: { hasMediaAttachment: false },
+      body: { text: captionText || '' },
+      footer: { text: footerText || '' },
+      nativeFlowMessage: {
+        buttons: [singleSelectButton],
+        messageParamsJson: '',
+        messageVersion: 1
+      }
+    }
+  };
+
+  const wamsg = generateWAMessageFromContent(jid, msgContent, {
+    userJid: sock.user?.id || jid
   });
-  return sent;
+
+  const additionalNodes = buildInteractiveNodes([singleSelectButton], jid);
+  await sock.relayMessage(jid, wamsg.message, { messageId: wamsg.key.id, additionalNodes });
+  return wamsg;
 }
 
 // === HELPER: Normalizar JID para almacenamiento (evita chats duplicados) ===
