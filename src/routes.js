@@ -874,6 +874,34 @@ router.post('/send', async (req, res) => {
       upsertChat(storageJidList, chatNameList, logTextList, Date.now()).catch(() => {});
       return res.json({ success: true, messageId: listResult.key?.id, btnMethod: 'list_message' });
 
+    } else if (type === 'menu') {
+      // === MENÚ NUMERADO en /send (compatible con cualquier WhatsApp) ===
+      const menuTitle2 = caption || (typeof msg === 'string' ? msg : '');
+      const menuFooter2 = footer || '';
+      const menuHeader2 = req.body.header || '';
+      const menuOptions2 = buttons || [];
+      const numEmojis2 = ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟'];
+      let menuText2 = '';
+      if (menuHeader2) menuText2 += `*${menuHeader2}*\n\n`;
+      if (menuTitle2) menuText2 += `${menuTitle2}\n\n`;
+      menuOptions2.forEach((b, i) => {
+        const label = b.buttonText?.displayText || b.text || b.label || b.title || ('Opción ' + (i + 1));
+        const emoji = b.emoji || numEmojis2[i] || `${i + 1}.`;
+        menuText2 += `${emoji} ${label}\n`;
+      });
+      const replyHint2 = req.body.replyHint !== undefined ? req.body.replyHint : true;
+      if (replyHint2 && menuOptions2.length > 0) menuText2 += `\n_Responde con el número de tu opción_`;
+      if (menuFooter2) menuText2 += `\n\n${menuFooter2}`;
+      const jidMenu2 = chatId.includes('@') ? chatId : chatId + '@s.whatsapp.net';
+      const sockMenu2 = getSocket();
+      if (!sockMenu2) return res.status(503).json({ error: 'Bot no conectado' });
+      const menuResult2 = await sockMenu2.sendMessage(jidMenu2, { text: menuText2.trim() });
+      const storageJidMn2 = normalizeStorageJid(chatId);
+      const chatNameMn2 = getContactName(chatId) || storageJidMn2.split('@')[0];
+      saveMessage(storageJidMn2, chatNameMn2, { messageId: menuResult2?.key?.id, fromMe: true, text: '[menu] ' + menuTitle2, type: 'menu', timestamp: Date.now() }).catch(() => {});
+      upsertChat(storageJidMn2, chatNameMn2, '[menu] ' + menuTitle2, Date.now()).catch(() => {});
+      return res.json({ success: true, messageId: menuResult2?.key?.id, btnMethod: 'text_menu' });
+
     } else if (type === 'image') {
       const imgUrl = mediaUrl || (typeof msg === 'object' ? msg.url : msg);
       const imgCaption = caption || (typeof msg === 'object' ? msg.caption : '');
