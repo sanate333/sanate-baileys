@@ -64,20 +64,23 @@ function startKeepAlive() {
 
 // === CARGAR CONFIG DESDE SUPABASE ===
 async function loadConfigFromSupabase(supabase) {
-  if (!supabase) return;
+  if (!supabase) { console.log('[Config] Supabase no disponible'); return; }
   const keys = ['META_TOKEN', 'META_PHONE_NUMBER_ID'];
-  const missing = keys.filter(k => !process.env[k]);
-  if (missing.length === 0) return;
+  keys.forEach(k => {
+    const v = process.env[k];
+    console.log('[Config] ENV ' + k + ': ' + (v ? v.length + ' chars' : 'VACIO'));
+  });
   try {
     const { data, error } = await supabase
       .from('app_config')
       .select('key, value')
-      .in('key', missing);
+      .in('key', keys);
     if (error) throw error;
+    console.log('[Config] Supabase devolvio ' + (data ? data.length : 0) + ' filas');
     (data || []).forEach(row => {
       if (row.value) {
         process.env[row.key] = row.value;
-        console.log('[Config] ' + row.key + ' cargado desde Supabase (' + row.value.length + ' chars)');
+        console.log('[Config] ' + row.key + ' SET desde Supabase (' + row.value.length + ' chars)');
       }
     });
   } catch (err) {
