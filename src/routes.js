@@ -677,6 +677,42 @@ router.post('/chats/:chatId/send', async (req, res) => {
       upsertChat(storageJidB, chatNameB, textForLog, Date.now()).catch(() => {});
       return res.json({ ok: true, success: true, messageId: btnMsgId, btnMethod });
 
+    } else if (type === 'menu') {
+      // === MENÚ NUMERADO (compatible con cualquier WhatsApp — estilo BotConversa API no oficial) ===
+      // Envía un mensaje de texto formateado con emojis numéricos y negrita.
+      // El usuario responde con "1", "2", etc. y el bot enruta según la respuesta.
+      const menuTitle = caption || (typeof message === 'string' ? message : '');
+      const menuFooter = footer || req.body.footer || '';
+      const menuOptions = buttons || [];
+      const numEmojis = ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟'];
+
+      let menuText = '';
+      if (header) menuText += `*${header}*\n\n`;
+      if (menuTitle) menuText += `${menuTitle}\n\n`;
+
+      menuOptions.forEach((b, i) => {
+        const label = b.buttonText?.displayText || b.text || b.label || b.title || ('Opción ' + (i + 1));
+        const emoji = b.emoji || numEmojis[i] || `${i + 1}.`;
+        menuText += `${emoji} ${label}\n`;
+      });
+
+      const replyHint = req.body.replyHint !== undefined ? req.body.replyHint : true;
+      if (replyHint && menuOptions.length > 0) {
+        menuText += `\n_Responde con el número de tu opción_`;
+      }
+      if (menuFooter) menuText += `\n\n${menuFooter}`;
+
+      const jidMenu = chatId.includes('@') ? chatId : chatId + '@s.whatsapp.net';
+      const sockMenu = getSocket();
+      if (!sockMenu) return res.status(503).json({ error: 'Bot no conectado' });
+      const menuResult = await sockMenu.sendMessage(jidMenu, { text: menuText.trim() });
+      const menuMsgId = menuResult?.key?.id;
+      const storageJidMn = normalizeStorageJid(chatId);
+      const chatNameMn = getContactName(chatId) || storageJidMn.split('@')[0];
+      saveMessage(storageJidMn, chatNameMn, { messageId: menuMsgId, fromMe: true, text: '[menu] ' + menuTitle, type: 'menu', timestamp: Date.now() }).catch(() => {});
+      upsertChat(storageJidMn, chatNameMn, '[menu] ' + menuTitle, Date.now()).catch(() => {});
+      return res.json({ ok: true, success: true, messageId: menuMsgId, btnMethod: 'text_menu' });
+
     } else if (type === 'poll') {
       // === ENCUESTA NATIVA (funciona en todas las versiones de WA) ===
       const pollQuestion = caption || (typeof message === 'string' ? message : '');
