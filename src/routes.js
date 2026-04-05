@@ -573,6 +573,24 @@ router.post('/chats/:chatId/send', async (req, res) => {
       upsertChat(storageJidB, chatNameB, textForLog, Date.now()).catch(() => {});
       return res.json({ ok: true, success: true, messageId: btnMsgId, btnMethod });
 
+    } else if (type === 'poll') {
+      // === ENCUESTA / POLL (funciona en todas las versiones de WA) ===
+      const pollQuestion = caption || (typeof message === 'string' ? message : '');
+      const pollOptions = (buttons || []).map(b => b.buttonText?.displayText || b.text || b.label || b.title).filter(Boolean);
+      const selectableCount = req.body.selectableCount || 1;
+      const jidPoll = chatId.includes('@') ? chatId : chatId + '@s.whatsapp.net';
+      const sock = getSocket();
+      if (!sock) return res.status(503).json({ error: 'Bot no conectado' });
+      const pollResult = await sock.sendMessage(jidPoll, {
+        poll: { name: pollQuestion, values: pollOptions, selectableCount }
+      });
+      const pollMsgId = pollResult?.key?.id;
+      const storageJidP = normalizeStorageJid(chatId);
+      const chatNameP = getContactName(chatId) || storageJidP.split('@')[0];
+      saveMessage(storageJidP, chatNameP, { messageId: pollMsgId, fromMe: true, text: '[poll] ' + pollQuestion, type: 'poll', timestamp: Date.now() }).catch(() => {});
+      upsertChat(storageJidP, chatNameP, '[poll] ' + pollQuestion, Date.now()).catch(() => {});
+      return res.json({ ok: true, success: true, messageId: pollMsgId, btnMethod: 'poll' });
+
     } else if (type === 'image') {
       const imgUrl = mediaUrl || (typeof message === 'object' ? message.url : message);
       const imgCaption = caption || (typeof message === 'object' ? message.caption : '');
