@@ -62,6 +62,29 @@ function startKeepAlive() {
   console.log('[KeepAlive] Self-ping activo cada 10 min -> ' + RENDER_URL);
 }
 
+// === CARGAR CONFIG DESDE SUPABASE ===
+async function loadConfigFromSupabase(supabase) {
+  if (!supabase) return;
+  const keys = ['META_TOKEN', 'META_PHONE_NUMBER_ID'];
+  const missing = keys.filter(k => !process.env[k]);
+  if (missing.length === 0) return;
+  try {
+    const { data, error } = await supabase
+      .from('app_config')
+      .select('key, value')
+      .in('key', missing);
+    if (error) throw error;
+    (data || []).forEach(row => {
+      if (row.value) {
+        process.env[row.key] = row.value;
+        console.log('[Config] ' + row.key + ' cargado desde Supabase (' + row.value.length + ' chars)');
+      }
+    });
+  } catch (err) {
+    console.warn('[Config] Error cargando desde Supabase:', err.message);
+  }
+}
+
 // === ARRANCAR TODO ===
 async function start() {
   console.log('Sanate WhatsApp Bot Server');
@@ -70,6 +93,10 @@ async function start() {
   console.log('Conectando Supabase...');
   const supabase = initSupabase();
   app.set('supabase', supabase);
+
+  console.log('Cargando configuracion desde Supabase...');
+  await loadConfigFromSupabase(supabase);
+  console.log('[Meta] metaCloudEnabled:', !!(process.env.META_TOKEN && process.env.META_PHONE_NUMBER_ID));
 
   server.listen(PORT, () => {
     console.log('Servidor corriendo en puerto ' + PORT);
