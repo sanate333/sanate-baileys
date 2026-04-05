@@ -66,7 +66,6 @@ async function buildMediaPayload(mediaUrl, captionText, options = {}) {
 }
 
 // === HELPER: Construir additionalNodes requeridos por WhatsApp para renderizar botones ===
-// Sin estos nodos binarios (interactive, biz, bot), los botones se envian pero NO se renderizan en el telefono
 function buildInteractiveNodes(buttons, jid) {
   const buttonTypes = (buttons || []).map(b => b.name);
   const hasUrls = buttonTypes.includes('cta_url');
@@ -78,7 +77,6 @@ function buildInteractiveNodes(buttons, jid) {
     : hasUrls ? 'cta_url'
     : 'quick_reply';
 
-  // NESTED: biz > interactive > native_flow (estructura correcta para delivery al dispositivo)
   return [
     {
       tag: 'biz',
@@ -97,7 +95,6 @@ function buildInteractiveNodes(buttons, jid) {
 }
 
 // === HELPER PRINCIPAL: Enviar mensaje interactivo con proto directo ===
-// Usa generateWAMessageFromContent + relayMessage + additionalNodes (REQUERIDO para botones reales)
 async function sendInteractiveMessageDirect(chatId, { buffer, contentType, mediaType, captionText, footerText, nativeButtons }) {
   const sock = getSocket();
   if (!sock) throw new Error('Socket de WhatsApp no disponible');
@@ -108,7 +105,6 @@ async function sendInteractiveMessageDirect(chatId, { buffer, contentType, media
 
   const jid = chatId.includes('@') ? chatId : chatId + '@s.whatsapp.net';
 
-  // Construir header con media subida a los servidores de WhatsApp
   let header = { hasMediaAttachment: false };
   if (buffer && prepareWAMessageMedia) {
     const isVideo = mediaType === 'video';
@@ -140,14 +136,12 @@ async function sendInteractiveMessageDirect(chatId, { buffer, contentType, media
     userJid: sock.user?.id || jid
   });
 
-  // CRITICO: additionalNodes son los nodos binarios que WhatsApp requiere para renderizar botones
   const additionalNodes = buildInteractiveNodes(nativeButtons, jid);
   await sock.relayMessage(jid, wamsg.message, { messageId: wamsg.key.id, additionalNodes });
   return wamsg;
 }
 
 // === HELPER: Enviar lista interactiva con single_select nativeFlowMessage ===
-// Usa generateWAMessageFromContent + relayMessage + additionalNodes (mismo patron que botones)
 async function sendListMessageDirect(chatId, { captionText, footerText, headerTitle, buttonText, sections }) {
   const sock = getSocket();
   if (!sock) throw new Error('Socket de WhatsApp no disponible');
@@ -156,7 +150,6 @@ async function sendListMessageDirect(chatId, { captionText, footerText, headerTi
 
   const jid = chatId.includes('@') ? chatId : chatId + '@s.whatsapp.net';
 
-  // Convertir secciones al formato que espera single_select
   const selectSections = sections.map(s => ({
     title: s.title || '',
     rows: (s.rows || []).map((r, i) => ({
@@ -196,10 +189,109 @@ async function sendListMessageDirect(chatId, { captionText, footerText, headerTi
   return wamsg;
 }
 
+// =============================================
+// META CLOUD API — Helpers
+// Activos cuando META_TOKEN + META_PHONE_NUMBER_ID están configurados
+// Phone Number ID: 105951208391723
+// WABA ID:        4577824649105640
+// =============================================
+
+function metaCloudEnabled() {
+  return !!(process.env.META_TOKEN && process.env.META_PHONE_NUMBER_ID);
+}
+
+async function sendMetaCloudRaw(to, payload) {
+  const token = process.env.META_TOKEN;
+  const phoneNumberId = process.env.META_PHONE_NUMBER_ID || '105951208391723';
+  if (!token) throw new Error('META_TOKEN no configurado');
+
+  const cleanTo = String(to).replace(/[^0-9]/g, '');
+  const response = await fetch(`https://graph.facebook.com/v19.0/${phoneNumberId}/messages`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      messaging_product: 'whatsapp',
+      to: cleanTo,
+      ...payload
+    })
+  });
+
+  const data = await response.json();
+  if (!response.ok || data.error) {
+    const errMsg = data.error?.message || `HTTP ${response.status}`;
+    throw new Error(`Meta API: ${errMsg}`);
+  }
+  return data;
+}
+
+// Botones de respuesta rápida (máx 3, títulos máx 20 chars)
+async function sendMetaButtons(to, { body, footer, header, buttons }) {
+  const cleanBtns = (buttons || []).slice(0, 3).map((b, i) => ({
+    type: 'reply',
+    reply: {
+      id: String(b.id || b.buttonId || b.rowId || `btn_${i}`).substring(0, 256),
+      title: String(b.text || b.label || b.title || b.buttonText?.displayText || `Opción ${i + 1}`).substring(0, 20)
+    }
+  }));
+
+  const interactive = {
+    type: 'button',
+    body: { text: body || '' },
+    action: { buttons: cleanBtns }
+  };
+  if (footer) interactive.footer = { text: String(footer).substring(0, 60) };
+  if (header) interactive.header = { type: 'text', text: String(header).substring(0, 60) };
+
+  return sendMetaCloudRaw(to, { type: 'interactive', interactive });
+}
+
+// Lista desplegable (máx 10 filas por sección, títulos máx 24 chars)
+async function sendMetaList(to, { body, footer, header, buttonText, sections }) {
+  const cleanSections = (sections || []).map(s => ({
+    title: String(s.title || '').substring(0, 24),
+    rows: (s.rows || []).slice(0, 10).map((r, i) => ({
+      id: String(r.rowId || r.id || `row_${i}`).substring(0, 200),
+      title: String(r.title || `Opción ${i + 1}`).substring(0, 24),
+      description: String(r.description || '').substring(0, 72)
+    }))
+  }));
+
+  const interactive = {
+    type: 'list',
+    body: { text: body || '' },
+    action: {
+      button: String(buttonText || 'Ver opciones').substring(0, 20),
+      sections: cleanSections
+    }
+  };
+  if (footer) interactive.footer = { text: String(footer).substring(0, 60) };
+  if (header) interactive.header = { type: 'text', text: String(header).substring(0, 60) };
+
+  return sendMetaCloudRaw(to, { type: 'interactive', interactive });
+}
+
+// Texto simple por Meta Cloud API
+async function sendMetaText(to, text) {
+  return sendMetaCloudRaw(to, {
+    type: 'text',
+    text: { body: String(text), preview_url: false }
+  });
+}
+
+// Imagen + caption por Meta Cloud API
+async function sendMetaImage(to, { imageUrl, caption }) {
+  return sendMetaCloudRaw(to, {
+    type: 'image',
+    image: { link: imageUrl, caption: caption || '' }
+  });
+}
+
 // === HELPER: Normalizar JID para almacenamiento (evita chats duplicados) ===
 function normalizeStorageJid(jid) {
   if (!jid) return jid;
-  // Quitar sufijo @s.whatsapp.net para almacenar siempre el numero limpio
   return jid.replace(/@s\.whatsapp\.net$/, '');
 }
 
@@ -207,11 +299,9 @@ function normalizeStorageJid(jid) {
 function buildNativeButtons(buttons) {
   if (!buttons || !Array.isArray(buttons)) return [];
   return buttons.map((b, i) => {
-    // Si ya viene en formato nativo { name, buttonParamsJson } → pasar directo
     if ((b.name === 'quick_reply' || b.name === 'cta_url' || b.name === 'single_select') && b.buttonParamsJson) {
       return { name: b.name, buttonParamsJson: b.buttonParamsJson };
     }
-    // Extraer label e id del buttonParamsJson si existe
     let label = b.buttonText?.displayText || b.text || b.label || b.title;
     let id = b.id;
     if (!label && b.buttonParamsJson) {
@@ -254,7 +344,7 @@ function parseMultipart(req, res, next) {
 router.use(parseMultipart);
 
 function auth(req, res, next) {
-  const openPaths = ['/events', '/status', '/qr', '/settings', '/ai-config', '/ai-usage'];
+  const openPaths = ['/events', '/status', '/qr', '/settings', '/ai-config', '/ai-usage', '/webhook'];
   if (openPaths.some(p => req.path === p || req.path.startsWith(p))) return next();
   if (process.env.API_SECRET) {
     const token = req.headers.authorization?.replace('Bearer ', '') || req.query.token || req.headers['x-api-key'];
@@ -274,6 +364,7 @@ router.get('/status', (req, res) => {
     sseClients: req.app.get('sse')?.getStatus()?.clients || 0,
     contactsInCache: contactCache.keys().length,
     server: 'sanate-wa-server', engine: 'baileys-standalone',
+    metaCloudEnabled: metaCloudEnabled(),
     timestamp: new Date().toISOString()
   });
 });
@@ -320,7 +411,6 @@ router.get('/chats', async (req, res) => {
 
 router.get('/chats/:chatId/messages', async (req, res) => {
   try {
-    // Normalizar: quitar @s.whatsapp.net para coincidir con como se guardan los mensajes
     const rawChatId = decodeURIComponent(req.params.chatId);
     const chatId = rawChatId.replace(/@s\.whatsapp\.net$/, '').replace(/@c\.us$/, '');
     const limit = parseInt(req.query.limit) || 50;
@@ -358,12 +448,10 @@ router.get('/events', (req, res) => {
 
 // =============================================
 // POST /chats/:chatId/send  (dashboard sends)
-// Acepta tanto JSON como FormData (el dashboard envia FormData con campo "text")
 // =============================================
 router.post('/chats/:chatId/send', async (req, res) => {
   try {
     const chatId = decodeURIComponent(req.params.chatId);
-    // Soporta: JSON { message } o FormData { text }
     const message = req.body.message || req.body.text;
     const type = req.body.type || 'text';
     const { mediaUrl, caption, header, footer, buttons } = req.body;
@@ -373,7 +461,6 @@ router.post('/chats/:chatId/send', async (req, res) => {
     let textForLog = typeof message === 'string' ? message : message.caption || '';
 
     if (type === 'template_pro') {
-      // === PLANTILLA PRO: imagen/video + caption + BOTONES INTERACTIVOS REALES ===
       const captionText = caption || (typeof message === 'string' ? message : '');
       const nativeButtons = buildNativeButtons(buttons);
 
@@ -396,21 +483,14 @@ router.post('/chats/:chatId/send', async (req, res) => {
         textForLog = '[' + mType + '+btn] ' + captionText.substring(0, 50);
 
         if (nativeButtons.length > 0 && mediaBuffer) {
-          // === METODO 1: relayMessage + proto directo (botones reales) ===
           try {
             mainResult = await sendInteractiveMessageDirect(chatId, {
-              buffer: mediaBuffer,
-              contentType: mediaContentType,
-              mediaType: mType,
-              captionText,
-              footerText: footer || '',
-              nativeButtons
+              buffer: mediaBuffer, contentType: mediaContentType, mediaType: mType,
+              captionText, footerText: footer || '', nativeButtons
             });
             btnMethod = 'relay_interactive';
-            console.log('[TemplatePro] relayMessage OK, botones:', nativeButtons.length);
           } catch (relayErr) {
-            console.error('[TemplatePro] relayMessage fallo:', relayErr.message, '- intentando sendMessage interactiveButtons');
-            // === METODO 2: sendMessage con interactiveButtons ===
+            console.error('[TemplatePro] relayMessage fallo:', relayErr.message);
             try {
               const payload = mType === 'video'
                 ? { video: mediaBuffer, caption: captionText, mimetype: mediaContentType, gifPlayback: false, interactiveButtons: nativeButtons }
@@ -418,8 +498,6 @@ router.post('/chats/:chatId/send', async (req, res) => {
               mainResult = await sendMessage(chatId, payload);
               btnMethod = 'sendmsg_interactive';
             } catch (sendErr) {
-              console.error('[TemplatePro] sendMessage interactiveButtons fallo:', sendErr.message, '- fallback a media+texto');
-              // === FALLBACK: media normal + botones como texto ===
               const plainPayload = mType === 'video'
                 ? { video: mediaBuffer, caption: captionText, mimetype: mediaContentType, gifPlayback: false }
                 : { image: mediaBuffer, caption: captionText, mimetype: mediaContentType };
@@ -436,25 +514,19 @@ router.post('/chats/:chatId/send', async (req, res) => {
             }
           }
         } else if (mediaBuffer) {
-          // Solo media sin botones
           const payload = mType === 'video'
             ? { video: mediaBuffer, caption: captionText, mimetype: mediaContentType, gifPlayback: false }
             : { image: mediaBuffer, caption: captionText, mimetype: mediaContentType };
           mainResult = await sendMessage(chatId, payload);
         } else {
-          // Media fallo descarga, intentar con URL directa
           mainResult = await sendMessage(chatId, { image: { url: mediaUrl }, caption: captionText });
           textForLog = '[img-url] ' + captionText.substring(0, 50);
         }
       } else if (nativeButtons.length > 0) {
-        // Solo texto + botones
         textForLog = '[btn] ' + captionText.substring(0, 50);
         try {
           mainResult = await sendInteractiveMessageDirect(chatId, {
-            buffer: null,
-            captionText,
-            footerText: footer || '',
-            nativeButtons
+            buffer: null, captionText, footerText: footer || '', nativeButtons
           });
           btnMethod = 'relay_interactive';
         } catch (e) {
@@ -472,7 +544,6 @@ router.post('/chats/:chatId/send', async (req, res) => {
       return res.json({ ok: true, success: true, messageId: msgId, btnMethod });
 
     } else if (type === 'list') {
-      // === LISTA INTERACTIVA: proto directo (generateWAMessageFromContent + relayMessage) ===
       const captionText = caption || (typeof message === 'string' ? message : '');
       const btnLabel = req.body.buttonText || 'Ver opciones';
       // Soporta sections[] directamente O construye desde buttons[]
@@ -495,6 +566,28 @@ router.post('/chats/:chatId/send', async (req, res) => {
         });
         finalSections = [{ title: sectionTitle, rows }];
       }
+
+      // Intentar Meta Cloud API primero si está configurado
+      const cleanPhone = chatId.replace(/[^0-9]/g, '');
+      if (metaCloudEnabled() && cleanPhone) {
+        try {
+          const metaResult = await sendMetaList(cleanPhone, {
+            body: captionText, footer: footer || '', header: header || '',
+            buttonText: btnLabel,
+            sections: finalSections
+          });
+          const listMsgId = metaResult.messages?.[0]?.id || 'meta_' + Date.now();
+          const storageJidL = normalizeStorageJid(chatId);
+          const chatNameL = getContactName(chatId) || storageJidL.split('@')[0];
+          const logTextL = '[list:meta] ' + captionText.substring(0, 50);
+          saveMessage(storageJidL, chatNameL, { messageId: listMsgId, fromMe: true, text: logTextL, type: 'list', timestamp: Date.now() }).catch(() => {});
+          upsertChat(storageJidL, chatNameL, logTextL, Date.now()).catch(() => {});
+          return res.json({ ok: true, success: true, messageId: listMsgId, btnMethod: 'meta_cloud_list' });
+        } catch (metaErr) {
+          console.error('[List] Meta Cloud fallo, usando Baileys:', metaErr.message);
+        }
+      }
+
       let listResult;
       try {
         listResult = await sendListMessageDirect(chatId, {
@@ -521,11 +614,30 @@ router.post('/chats/:chatId/send', async (req, res) => {
       return res.json({ ok: true, success: true, messageId: listMsgId, btnMethod: 'list_message' });
 
     } else if (type === 'buttons') {
-      // === BOTONES INTERACTIVOS (solo texto, sin media) ===
       const captionText = caption || (typeof message === 'string' ? message : '');
       textForLog = '[btn] ' + captionText.substring(0, 50);
 
-      // Construir array de botones en formato legacy (buttonsMessage)
+      // === META CLOUD API PRIMERO (si está configurado) ===
+      const cleanPhone = chatId.replace(/[^0-9]/g, '');
+      if (metaCloudEnabled() && cleanPhone) {
+        try {
+          const metaResult = await sendMetaButtons(cleanPhone, {
+            body: captionText, footer: footer || '', header: header || '',
+            buttons: buttons || []
+          });
+          const metaMsgId = metaResult.messages?.[0]?.id || 'meta_' + Date.now();
+          const storageJidM = normalizeStorageJid(chatId);
+          const chatNameM = getContactName(chatId) || storageJidM.split('@')[0];
+          saveMessage(storageJidM, chatNameM, { messageId: metaMsgId, fromMe: true, text: textForLog, type: 'buttons', timestamp: Date.now() }).catch(() => {});
+          upsertChat(storageJidM, chatNameM, textForLog, Date.now()).catch(() => {});
+          console.log('[Buttons] Meta Cloud API OK:', metaMsgId);
+          return res.json({ ok: true, success: true, messageId: metaMsgId, btnMethod: 'meta_cloud' });
+        } catch (metaErr) {
+          console.error('[Buttons] Meta Cloud fallo, usando Baileys:', metaErr.message);
+        }
+      }
+
+      // === FALLBACK: relay_interactive → buttonsMessage → texto ===
       const legacyBtns = (buttons || []).map((b, i) => {
         let label = b.buttonText?.displayText || b.text || b.label || b.title;
         let btnId = b.id;
@@ -540,27 +652,19 @@ router.post('/chats/:chatId/send', async (req, res) => {
       let btnMethod = 'none';
       const nativeButtons = buildNativeButtons(buttons);
 
-      // METODO 1: nativeFlowMessage + additionalNodes (botones reales, funciona en WA moderno)
       try {
         btnResult = await sendInteractiveMessageDirect(chatId, {
           buffer: null, captionText, footerText: footer || '', nativeButtons
         });
         btnMethod = 'relay_interactive';
-        console.log('[Buttons] relay_interactive OK:', nativeButtons.length, 'botones');
       } catch (e1) {
-        console.error('[Buttons] relay_interactive fallo:', e1.message, '- intentando buttonsMessage legacy');
-        // METODO 2: buttonsMessage (legacy, puede llegar como texto en WA moderno)
         try {
           btnResult = await sendMessage(chatId, {
-            text: captionText,
-            footer: footer || '',
-            buttons: legacyBtns,
-            headerType: 1
+            text: captionText, footer: footer || '',
+            buttons: legacyBtns, headerType: 1
           });
           btnMethod = 'buttons_msg';
-          console.log('[Buttons] buttonsMessage OK:', legacyBtns.length, 'botones');
         } catch (e2) {
-          console.error('[Buttons] buttonsMessage fallo:', e2.message, '- fallback texto');
           btnResult = await sendMessage(chatId, { text: captionText });
           btnMethod = 'text_fallback';
         }
@@ -574,14 +678,14 @@ router.post('/chats/:chatId/send', async (req, res) => {
       return res.json({ ok: true, success: true, messageId: btnMsgId, btnMethod });
 
     } else if (type === 'poll') {
-      // === ENCUESTA / POLL (funciona en todas las versiones de WA) ===
+      // === ENCUESTA NATIVA (funciona en todas las versiones de WA) ===
       const pollQuestion = caption || (typeof message === 'string' ? message : '');
       const pollOptions = (buttons || []).map(b => b.buttonText?.displayText || b.text || b.label || b.title).filter(Boolean);
       const selectableCount = req.body.selectableCount || 1;
       const jidPoll = chatId.includes('@') ? chatId : chatId + '@s.whatsapp.net';
-      const sock = getSocket();
-      if (!sock) return res.status(503).json({ error: 'Bot no conectado' });
-      const pollResult = await sock.sendMessage(jidPoll, {
+      const sockPoll = getSocket();
+      if (!sockPoll) return res.status(503).json({ error: 'Bot no conectado' });
+      const pollResult = await sockPoll.sendMessage(jidPoll, {
         poll: { name: pollQuestion, values: pollOptions, selectableCount }
       });
       const pollMsgId = pollResult?.key?.id;
@@ -762,6 +866,131 @@ router.post('/send', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// =============================================
+// POST /meta-send — Envío directo por Meta Cloud API
+// Requiere env: META_TOKEN, META_PHONE_NUMBER_ID
+// Ejemplo: { "to": "573227461878", "type": "buttons", "body": "¿Qué necesitas?",
+//            "buttons": [{"id":"p1","text":"Ver productos"},{"id":"p2","text":"Hacer pedido"}] }
+// =============================================
+router.post('/meta-send', async (req, res) => {
+  try {
+    if (!metaCloudEnabled()) {
+      return res.status(503).json({
+        error: 'Meta Cloud API no configurada',
+        hint: 'Agrega META_TOKEN y META_PHONE_NUMBER_ID en las variables de entorno de Render'
+      });
+    }
+
+    const { to, type = 'text', body, message, footer, header, buttons, sections, buttonText } = req.body;
+    if (!to) return res.status(400).json({ error: '"to" (número destino) es requerido' });
+
+    const cleanTo = String(to).replace(/[^0-9]/g, '');
+    const msgBody = body || message || '';
+    let result;
+
+    if (type === 'buttons') {
+      result = await sendMetaButtons(cleanTo, { body: msgBody, footer, header, buttons: buttons || [] });
+    } else if (type === 'list') {
+      result = await sendMetaList(cleanTo, { body: msgBody, footer, header, buttonText, sections: sections || [] });
+    } else if (type === 'image') {
+      const imgUrl = req.body.imageUrl || req.body.mediaUrl || msgBody;
+      result = await sendMetaImage(cleanTo, { imageUrl: imgUrl, caption: footer || '' });
+    } else {
+      result = await sendMetaText(cleanTo, msgBody);
+    }
+
+    const msgId = result.messages?.[0]?.id || 'meta_' + Date.now();
+    res.json({ ok: true, meta: true, messageId: msgId, to: cleanTo, type });
+  } catch (err) {
+    console.error('[/meta-send]', err.message);
+    res.status(500).json({ error: err.message, meta: true });
+  }
+});
+
+// =============================================
+// GET /webhook — Verificación de webhook Meta
+// Configura en Meta: URL = https://sanate-wa-bot.onrender.com/api/whatsapp/webhook
+// Verify Token = valor de META_WEBHOOK_TOKEN (o 'sanate_webhook' por default)
+// =============================================
+router.get('/webhook', (req, res) => {
+  const VERIFY_TOKEN = process.env.META_WEBHOOK_TOKEN || 'sanate_webhook';
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+
+  if (mode === 'subscribe' && token === VERIFY_TOKEN) {
+    console.log('[Webhook Meta] Verificación exitosa');
+    return res.send(challenge);
+  }
+  res.status(403).json({ error: 'Webhook verification failed' });
+});
+
+// =============================================
+// POST /webhook — Recibir mensajes y clicks desde Meta Cloud API
+// =============================================
+router.post('/webhook', async (req, res) => {
+  res.sendStatus(200); // Responder 200 inmediatamente (requisito de Meta)
+  try {
+    const body = req.body;
+    if (body.object !== 'whatsapp_business_account') return;
+
+    const sse = req.app.get('sse');
+
+    for (const entry of body.entry || []) {
+      for (const change of entry.changes || []) {
+        if (change.field !== 'messages') continue;
+        const value = change.value;
+
+        for (const msg of value.messages || []) {
+          const from = msg.from;
+          let text = '';
+          let msgType = msg.type;
+
+          if (msg.type === 'text') {
+            text = msg.text?.body || '';
+          } else if (msg.type === 'interactive') {
+            if (msg.interactive?.type === 'button_reply') {
+              text = `[btn:${msg.interactive.button_reply.id}] ${msg.interactive.button_reply.title}`;
+              msgType = 'button_reply';
+            } else if (msg.interactive?.type === 'list_reply') {
+              text = `[list:${msg.interactive.list_reply.id}] ${msg.interactive.list_reply.title}`;
+              msgType = 'list_reply';
+            }
+          } else if (msg.type === 'image') {
+            text = '[imagen]';
+          } else if (msg.type === 'audio') {
+            text = '[audio]';
+          } else if (msg.type === 'document') {
+            text = '[documento]';
+          }
+
+          const contactName = value.contacts?.[0]?.profile?.name || getContactName(from) || from;
+          const msgId = msg.id;
+          const ts = parseInt(msg.timestamp) * 1000 || Date.now();
+
+          await saveMessage(from, contactName, {
+            messageId: msgId, fromMe: false, text, type: msgType, timestamp: ts
+          }).catch(() => {});
+          await upsertChat(from, contactName, text, ts).catch(() => {});
+
+          if (sse) {
+            sse.broadcast({
+              type: 'new_message',
+              chatId: from, messageId: msgId, text,
+              direction: 'incoming', timestamp: ts,
+              contactName, source: 'meta_cloud'
+            });
+          }
+
+          console.log(`[Webhook Meta] Mensaje de ${from} (${msgType}): ${text.substring(0, 60)}`);
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[Webhook Meta] Error:', err.message);
+  }
+});
+
 router.post('/disconnect', async (req, res) => {
   try { await disconnect(); res.json({ success: true, message: 'Desconectado' }); }
   catch (err) { res.status(500).json({ error: err.message }); }
@@ -769,10 +998,11 @@ router.post('/disconnect', async (req, res) => {
 
 router.get('/settings', (req, res) => {
   res.json({
-    server: 'sanate-wa-server', version: '3.4.0', engine: 'baileys-standalone',
+    server: 'sanate-wa-server', version: '3.5.0', engine: 'baileys-standalone',
     connection: getConnectionState(), sse: req.app.get('sse')?.getStatus(),
     supabase: !!req.app.get('supabase'), uptime: Math.floor(process.uptime()),
-    contacts: contactCache.keys().length
+    contacts: contactCache.keys().length,
+    metaCloud: metaCloudEnabled()
   });
 });
 
