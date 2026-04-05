@@ -475,19 +475,33 @@ router.post('/chats/:chatId/send', async (req, res) => {
       // === LISTA INTERACTIVA: proto directo (generateWAMessageFromContent + relayMessage) ===
       const captionText = caption || (typeof message === 'string' ? message : '');
       const btnLabel = req.body.buttonText || 'Ver opciones';
-      const sectionTitle = req.body.sectionTitle || 'Opciones';
-      const rows = (buttons || []).map((b, i) => {
-        const title = b.buttonText?.displayText || b.text || b.label || b.title || ('Opcion ' + (i + 1));
-        const rowId = b.id || title.toLowerCase().replace(/[^a-z0-9]/g, '_').substring(0, 20);
-        return { rowId, title, description: b.description || '' };
-      });
+      // Soporta sections[] directamente O construye desde buttons[]
+      let finalSections;
+      if (req.body.sections && Array.isArray(req.body.sections) && req.body.sections.length > 0) {
+        finalSections = req.body.sections.map(s => ({
+          title: s.title || '',
+          rows: (s.rows || []).map((r, i) => ({
+            rowId: r.rowId || r.id || ('row_' + i),
+            title: r.title || '',
+            description: r.description || ''
+          }))
+        }));
+      } else {
+        const sectionTitle = req.body.sectionTitle || 'Opciones';
+        const rows = (buttons || []).map((b, i) => {
+          const title = b.buttonText?.displayText || b.text || b.label || b.title || ('Opcion ' + (i + 1));
+          const rowId = b.id || title.toLowerCase().replace(/[^a-z0-9]/g, '_').substring(0, 20);
+          return { rowId, title, description: b.description || '' };
+        });
+        finalSections = [{ title: sectionTitle, rows }];
+      }
       let listResult;
       try {
         listResult = await sendListMessageDirect(chatId, {
           captionText, footerText: footer || '',
           headerTitle: req.body.listTitle || req.body.title || header || '',
           buttonText: btnLabel,
-          sections: [{ title: sectionTitle, rows }]
+          sections: finalSections
         });
       } catch (listProtoErr) {
         console.error('[List] proto fallo, fallback:', listProtoErr.message);
@@ -495,7 +509,7 @@ router.post('/chats/:chatId/send', async (req, res) => {
           text: captionText, footer: footer || '',
           title: req.body.listTitle || req.body.title || header || '',
           buttonText: btnLabel,
-          sections: [{ title: sectionTitle, rows }]
+          sections: finalSections
         });
       }
       const listMsgId = listResult.key?.id;
@@ -524,29 +538,29 @@ router.post('/chats/:chatId/send', async (req, res) => {
 
       let btnResult;
       let btnMethod = 'none';
+      const nativeButtons = buildNativeButtons(buttons);
 
-      // METODO 1: buttonsMessage (legacy, mejor delivery en cuentas personales)
+      // METODO 1: nativeFlowMessage + additionalNodes (botones reales, funciona en WA moderno)
       try {
-        btnResult = await sendMessage(chatId, {
-          text: captionText,
-          footer: footer || '',
-          buttons: legacyBtns,
-          headerType: 1
+        btnResult = await sendInteractiveMessageDirect(chatId, {
+          buffer: null, captionText, footerText: footer || '', nativeButtons
         });
-        btnMethod = 'buttons_msg';
-        console.log('[Buttons] buttonsMessage OK:', legacyBtns.length, 'botones');
+        btnMethod = 'relay_interactive';
+        console.log('[Buttons] relay_interactive OK:', nativeButtons.length, 'botones');
       } catch (e1) {
-        console.error('[Buttons] buttonsMessage fallo:', e1.message, '- intentando native_flow');
-        // METODO 2: nativeFlowMessage con additionalNodes anidados
-        const nativeButtons = buildNativeButtons(buttons);
+        console.error('[Buttons] relay_interactive fallo:', e1.message, '- intentando buttonsMessage legacy');
+        // METODO 2: buttonsMessage (legacy, puede llegar como texto en WA moderno)
         try {
-          btnResult = await sendInteractiveMessageDirect(chatId, {
-            buffer: null, captionText, footerText: footer || '', nativeButtons
+          btnResult = await sendMessage(chatId, {
+            text: captionText,
+            footer: footer || '',
+            buttons: legacyBtns,
+            headerType: 1
           });
-          btnMethod = 'relay_interactive';
-          console.log('[Buttons] relay_interactive OK:', nativeButtons.length, 'botones');
+          btnMethod = 'buttons_msg';
+          console.log('[Buttons] buttonsMessage OK:', legacyBtns.length, 'botones');
         } catch (e2) {
-          console.error('[Buttons] relay fallo:', e2.message, '- fallback texto');
+          console.error('[Buttons] buttonsMessage fallo:', e2.message, '- fallback texto');
           btnResult = await sendMessage(chatId, { text: captionText });
           btnMethod = 'text_fallback';
         }
