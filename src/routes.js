@@ -1192,4 +1192,150 @@ router.get('/ai-usage', (req, res) => {
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// =============================================
+// WABA MULTI-TIENDA — Botones reales por número
+// =============================================
+
+// GET /waba/numbers — Listar todos los números WABA conectados
+router.get('/waba/numbers', async (req, res) => {
+  try {
+    const supabase = req.app.get('supabase');
+    if (!supabase) return res.status(503).json({ error: 'Supabase no disponible' });
+    const { data, error } = await supabase
+      .from('oasis_waba_connections')
+      .select('id, store_id, display_name, phone_number, phone_number_id, waba_id, quality_rating, status, meta_verified, created_at')
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+    res.json({ ok: true, numbers: data || [] });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// POST /waba/connect — Conectar nuevo número WABA (guarda credenciales)
+router.post('/waba/connect', async (req, res) => {
+  try {
+    const supabase = req.app.get('supabase');
+    if (!supabase) return res.status(503).json({ error: 'Supabase no disponible' });
+    const { display_name, phone_number, phone_number_id, access_token, waba_id, store_id } = req.body;
+    if (!phone_number_id || !access_token) {
+      return res.status(400).json({ error: 'phone_number_id y access_token son requeridos' });
+    }
+    // Verificar credenciales con Meta antes de guardar
+    let metaVerified = false;
+    let metaPhone = phone_number;
+    let metaName = display_name;
+    try {
+      const verifyResp = await fetch(`https://graph.facebook.com/v19.0/${phone_number_id}?fields=display_phone_number,verified_name,quality_rating`, {
+        headers: { Authorization: `Bearer ${access_token}` }
+      });
+      const verifyData = await verifyResp.json();
+      if (!verifyData.error) {
+        metaVerified = true;
+        metaPhone = verifyData.display_phone_number || phone_number;
+        metaName = verifyData.verified_name || display_name;
+      }
+    } catch (e) { /* continuar aunque falle la verificación */ }
+
+    const { data, error } = await supabase
+      .from('oasis_waba_connections')
+      .upsert({
+        store_id: store_id || 'default',
+        display_name: metaName || phone_number,
+        phone_number: metaPhone || phone_number,
+        phone_number_id,
+        access_token,
+        waba_id: waba_id || null,
+        status: 'connected',
+        meta_verified: metaVerified,
+        updated_at: new Date().toISOString()
+      }, { onConflict: 'phone_number_id', ignoreDuplicates: false });
+    if (error) throw error;
+    console.log(`[WABA] Número conectado: ${metaPhone || phone_number} | ID: ${phone_number_id} | Verificado: ${metaVerified}`);
+    res.json({ ok: true, success: true, phone_number: metaPhone || phone_number, display_name: metaName, meta_verified: metaVerified });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// DELETE /waba/disconnect/:phoneNumberId — Desconectar número WABA
+router.delete('/waba/disconnect/:phoneNumberId', async (req, res) => {
+  try {
+    const supabase = req.app.get('supabase');
+    if (!supabase) return res.status(503).json({ error: 'Supabase no disponible' });
+    const { phoneNumberId } = req.params;
+    const { error } = await supabase
+      .from('oasis_waba_connections')
+      .delete()
+      .eq('phone_number_id', phoneNumberId);
+    if (error) throw error;
+    console.log(`[WABA] Número desconectado: ${phoneNumberId}`);
+    res.json({ ok: true, success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// POST /waba/test/:phoneNumberId — Enviar mensaje de prueba desde número WABA
+router.post('/waba/test/:phoneNumberId', async (req, res) => {
+  try {
+    const supabase = req.app.get('supabase');
+    if (!supabase) return res.status(503).json({ error: 'Supabase no disponible' });
+    const { phoneNumberId } = req.params;
+    const { to } = req.body;
+    if (!to) return res.status(400).json({ error: 'Número destinatario (to) requerido' });
+    // Get token for this phone number
+    const { data, error } = await supabase
+      .from('oasis_waba_connections')
+      .select('access_token, phone_number')
+      .eq('phone_number_id', phoneNumberId)
+      .single();
+    if (error || !data) return res.status(404).json({ error: 'Número WABA no encontrado' });
+    const cleanTo = String(to).replace(/[^0-9]/g, '');
+    const testPayload = {
+      messaging_product: 'whatsapp',
+      to: cleanTo,
+      type: 'interactive',
+      interactive: {
+        type: 'button',
+        body: { text: '✅ Prueba de botones WABA desde *' + (data.phone_number || phoneNumberId) + '*\n¿Todo funcionando?' },
+        action: {
+          buttons: [
+            { type: 'reply', reply: { id: 'test_si', title: '✅ Sí, funciona' } },
+            { type: 'reply', reply: { id: 'test_info', title: '📞 Más info' } }
+          ]
+        }
+      }
+    };
+    const resp = await fetch(`https://graph.facebook.com/v19.0/${phoneNumberId}/messages`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${data.access_token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(testPayload)
+    });
+    const result = await resp.json();
+    if (result.error) return res.status(400).json({ error: result.error.message, details: result.error });
+    const wamid = result.messages?.[0]?.id;
+    console.log(`[WABA Test] OK desde ${phoneNumberId} → ${cleanTo} | WAMID: ${wamid}`);
+    res.json({ ok: true, success: true, wamid, to: cleanTo });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// POST /waba/verify — Verificar token Meta y obtener info del número
+router.post('/waba/verify', async (req, res) => {
+  try {
+    const { phone_number_id, access_token } = req.body;
+    if (!phone_number_id || !access_token) {
+      return res.status(400).json({ error: 'phone_number_id y access_token requeridos' });
+    }
+    const resp = await fetch(
+      `https://graph.facebook.com/v19.0/${phone_number_id}?fields=display_phone_number,verified_name,quality_rating,platform_type,code_verification_status`,
+      { headers: { Authorization: `Bearer ${access_token}` } }
+    );
+    const data = await resp.json();
+    if (data.error) return res.status(400).json({ ok: false, error: data.error.message, code: data.error.code });
+    res.json({
+      ok: true,
+      phone_number: data.display_phone_number,
+      verified_name: data.verified_name,
+      quality_rating: data.quality_rating,
+      platform: data.platform_type,
+      verified: data.code_verification_status === 'VERIFIED'
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 module.exports = router;
