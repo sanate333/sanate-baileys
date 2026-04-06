@@ -222,8 +222,12 @@ async function sendMetaCloudRaw(to, payload) {
   const data = await response.json();
   if (!response.ok || data.error) {
     const errMsg = data.error?.message || `HTTP ${response.status}`;
+    console.error('[Meta API] Error completo:', JSON.stringify(data));
+    console.error('[Meta API] Phone Number ID usado:', phoneNumberId);
+    console.error('[Meta API] Destinatario:', cleanTo);
     throw new Error(`Meta API: ${errMsg}`);
   }
+  console.log('[Meta API] OK - WAMID:', data.messages?.[0]?.id, '| PhoneID:', phoneNumberId, '| To:', cleanTo);
   return data;
 }
 
@@ -457,19 +461,17 @@ router.post('/chats/:chatId/send', async (req, res) => {
     let { mediaUrl, caption, header, footer, buttons } = req.body;
     if (!chatId || !message) return res.status(400).json({ error: 'chatId y message son requeridos' });
 
-    // Auto-convert dashboard text messages to poll messages (server-side SBI)
-    // Polls son el ÚNICO formato interactivo que funciona en cuentas personales (número QR)
-    // nativeFlowMessage / buttonsMessage NO renderizan en cuentas personales (limitación de WhatsApp)
+    // Auto-convert dashboard text messages to interactive buttons via Meta Cloud API (server-side SBI)
     const SANATE_BUTTONS_DEFAULT = [
       { text: '\uD83D\uDCE6 Ver mis pedidos', id: 'ver_pedidos' },
       { text: '\uD83D\uDCAC Hablar asesor', id: 'hablar_asesor' },
       { text: '\u274C No gracias', id: 'no_gracias' }
     ];
     if (type === 'text' && !mediaUrl) {
-      type = 'poll';  // Poll nativo de WA — funciona en cuentas personales (número QR)
+      type = 'buttons';  // Meta Cloud API → botones reales en WhatsApp
       caption = caption || (typeof message === 'string' ? message : '');
       buttons = (buttons && buttons.length > 0) ? buttons : SANATE_BUTTONS_DEFAULT;
-      console.log('[SBI-server] Convirtiendo texto → poll interactivo:', caption.substring(0, 60));
+      console.log('[SBI-server] Convirtiendo texto → botones Meta Cloud:', caption.substring(0, 60));
     }
 
     let content;
