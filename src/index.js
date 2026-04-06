@@ -6,6 +6,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const path = require('path');
 const { createServer } = require('http');
 
 const { initBaileys, getSocket, getQR, getConnectionState } = require('./baileys');
@@ -24,6 +25,12 @@ app.use(cors({
   credentials: true
 }));
 app.use(express.json({ limit: '10mb' }));
+
+// === HOTFIXES: sirve scripts de UI desde /hotfixes ===
+app.use('/hotfixes', (req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  next();
+}, express.static(path.join(__dirname, '../hotfixes')));
 
 // === SSE MANAGER (tiempo real) ===
 const sse = new SSEManager();
