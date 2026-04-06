@@ -457,17 +457,18 @@ router.post('/chats/:chatId/send', async (req, res) => {
     let { mediaUrl, caption, header, footer, buttons } = req.body;
     if (!chatId || !message) return res.status(400).json({ error: 'chatId y message son requeridos' });
 
-    // Auto-convert dashboard text messages to button messages (server-side SBI)
+    // Auto-convert dashboard text messages to interactive button messages (server-side SBI)
+    // Uses template_pro → sendInteractiveMessageDirect (Baileys QR number, NOT Meta Cloud)
     const SANATE_BUTTONS_DEFAULT = [
       { text: '\uD83D\uDCE6 Ver mis pedidos', id: 'ver_pedidos' },
       { text: '\uD83D\uDCAC Hablar asesor', id: 'hablar_asesor' },
       { text: '\u274C No gracias', id: 'no_gracias' }
     ];
     if (type === 'text' && !mediaUrl) {
-      type = 'buttons';
+      type = 'template_pro';  // Baileys nativeFlowMessage path (QR number)
       caption = caption || (typeof message === 'string' ? message : '');
       buttons = (buttons && buttons.length > 0) ? buttons : SANATE_BUTTONS_DEFAULT;
-      console.log('[SBI-server] Convirtiendo texto a botones:', caption.substring(0, 60));
+      console.log('[SBI-server] Convirtiendo texto → botones Baileys:', caption.substring(0, 60));
     }
 
     let content;
@@ -542,9 +543,24 @@ router.post('/chats/:chatId/send', async (req, res) => {
             buffer: null, captionText, footerText: footer || '', nativeButtons
           });
           btnMethod = 'relay_interactive';
+          console.log('[SBI-server] relay_interactive OK:', captionText.substring(0, 40));
         } catch (e) {
-          mainResult = await sendMessage(chatId, { text: captionText, footer: footer || '', interactiveButtons: nativeButtons });
-          btnMethod = 'sendmsg_interactive';
+          console.warn('[SBI-server] relay_interactive falló:', e.message, '- intentando sendmsg_interactive');
+          try {
+            mainResult = await sendMessage(chatId, { text: captionText, footer: footer || '', interactiveButtons: nativeButtons });
+            btnMethod = 'sendmsg_interactive';
+            console.log('[SBI-server] sendmsg_interactive OK');
+          } catch (e2) {
+            console.warn('[SBI-server] sendmsg_interactive falló:', e2.message, '- intentando legacy buttons');
+            const legacyBtnsT = nativeButtons.map((b, i) => {
+              let label = b.buttonParamsJson ? (() => { try { return JSON.parse(b.buttonParamsJson).display_text; } catch(x) { return null; } })() : null;
+              label = label || ('Opcion ' + (i + 1));
+              return { buttonId: b.id || String(i), buttonText: { displayText: label }, type: 1 };
+            });
+            mainResult = await sendMessage(chatId, { text: captionText, buttons: legacyBtnsT, headerType: 1 });
+            btnMethod = 'legacy_buttons';
+            console.log('[SBI-server] legacy_buttons OK');
+          }
         }
       } else {
         mainResult = await sendMessage(chatId, { text: typeof message === 'string' ? message : '' });
