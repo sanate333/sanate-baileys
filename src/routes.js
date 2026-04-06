@@ -768,28 +768,10 @@ router.post('/chats/:chatId/send', async (req, res) => {
       content = { text: typeof message === 'string' ? message : JSON.stringify(message) };
     }
 
-    const storageJid = normalizeStorageJid(chatId);
-    const chatName = getContactName(chatId) || storageJid.split('@')[0];
-
-    // === META CLOUD API para texto simple (cuando esté configurado) ===
-    if (metaCloudEnabled() && content && content.text) {
-      const metaPhoneT = chatId.replace(/[^0-9]/g, '');
-      if (metaPhoneT) {
-        try {
-          const metaResT = await sendMetaText(metaPhoneT, content.text);
-          const metaMsgIdT = metaResT.messages?.[0]?.id || 'meta_' + Date.now();
-          console.log('[Text] Meta Cloud API OK:', metaMsgIdT);
-          saveMessage(storageJid, chatName, { messageId: metaMsgIdT, fromMe: true, text: textForLog, type, timestamp: Date.now() }).catch(() => {});
-          upsertChat(storageJid, chatName, textForLog, Date.now()).catch(() => {});
-          return res.json({ ok: true, success: true, messageId: metaMsgIdT, method: 'meta_cloud' });
-        } catch (metaErrT) {
-          console.error('[Text] Meta Cloud fallo, usando Baileys:', metaErrT.message);
-        }
-      }
-    }
-
     const result = await sendMessage(chatId, content);
     const msgId = result.key?.id || result.key;
+    const storageJid = normalizeStorageJid(chatId);
+    const chatName = getContactName(chatId) || storageJid.split('@')[0];
     saveMessage(storageJid, chatName, { messageId: msgId, fromMe: true, text: textForLog, type: type, timestamp: Date.now() }).catch(() => {});
     upsertChat(storageJid, chatName, textForLog, Date.now()).catch(() => {});
     res.json({ ok: true, success: true, messageId: msgId });
