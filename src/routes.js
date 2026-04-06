@@ -453,9 +453,22 @@ router.post('/chats/:chatId/send', async (req, res) => {
   try {
     const chatId = decodeURIComponent(req.params.chatId);
     const message = req.body.message || req.body.text;
-    const type = req.body.type || 'text';
-    const { mediaUrl, caption, header, footer, buttons } = req.body;
+    let type = req.body.type || 'text';
+    let { mediaUrl, caption, header, footer, buttons } = req.body;
     if (!chatId || !message) return res.status(400).json({ error: 'chatId y message son requeridos' });
+
+    // Auto-convert dashboard text messages to button messages (server-side SBI)
+    const SANATE_BUTTONS_DEFAULT = [
+      { text: '\uD83D\uDCE6 Ver mis pedidos', id: 'ver_pedidos' },
+      { text: '\uD83D\uDCAC Hablar asesor', id: 'hablar_asesor' },
+      { text: '\u274C No gracias', id: 'no_gracias' }
+    ];
+    if (type === 'text' && !mediaUrl) {
+      type = 'buttons';
+      caption = caption || (typeof message === 'string' ? message : '');
+      buttons = (buttons && buttons.length > 0) ? buttons : SANATE_BUTTONS_DEFAULT;
+      console.log('[SBI-server] Convirtiendo texto a botones:', caption.substring(0, 60));
+    }
 
     let content;
     let textForLog = typeof message === 'string' ? message : message.caption || '';
