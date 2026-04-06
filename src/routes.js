@@ -362,6 +362,7 @@ function auth(req, res, next) {
 router.use(auth);
 
 router.get('/status', (req, res) => {
+  const RENDER_URL = process.env.RENDER_EXTERNAL_URL || 'https://sanate-wa-bot.onrender.com';
   res.json({
     status: getConnectionState(), connected: getConnectionState() === 'connected',
     hasQR: !!getQR(), uptime: Math.floor(process.uptime()),
@@ -369,7 +370,8 @@ router.get('/status', (req, res) => {
     contactsInCache: contactCache.keys().length,
     server: 'sanate-wa-server', engine: 'baileys-standalone',
     metaCloudEnabled: metaCloudEnabled(),
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    extraScripts: [RENDER_URL + '/hotfixes/waba-connect-ui.js']
   });
 });
 
