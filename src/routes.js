@@ -457,18 +457,19 @@ router.post('/chats/:chatId/send', async (req, res) => {
     let { mediaUrl, caption, header, footer, buttons } = req.body;
     if (!chatId || !message) return res.status(400).json({ error: 'chatId y message son requeridos' });
 
-    // Auto-convert dashboard text messages to interactive button messages (server-side SBI)
-    // Uses template_pro → sendInteractiveMessageDirect (Baileys QR number, NOT Meta Cloud)
+    // Auto-convert dashboard text messages to poll messages (server-side SBI)
+    // Polls son el ÚNICO formato interactivo que funciona en cuentas personales (número QR)
+    // nativeFlowMessage / buttonsMessage NO renderizan en cuentas personales (limitación de WhatsApp)
     const SANATE_BUTTONS_DEFAULT = [
       { text: '\uD83D\uDCE6 Ver mis pedidos', id: 'ver_pedidos' },
       { text: '\uD83D\uDCAC Hablar asesor', id: 'hablar_asesor' },
       { text: '\u274C No gracias', id: 'no_gracias' }
     ];
     if (type === 'text' && !mediaUrl) {
-      type = 'template_pro';  // Baileys nativeFlowMessage path (QR number)
+      type = 'poll';  // Poll nativo de WA — funciona en cuentas personales (número QR)
       caption = caption || (typeof message === 'string' ? message : '');
       buttons = (buttons && buttons.length > 0) ? buttons : SANATE_BUTTONS_DEFAULT;
-      console.log('[SBI-server] Convirtiendo texto → botones Baileys:', caption.substring(0, 60));
+      console.log('[SBI-server] Convirtiendo texto → poll interactivo:', caption.substring(0, 60));
     }
 
     let content;
