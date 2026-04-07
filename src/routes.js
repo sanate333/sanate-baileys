@@ -601,27 +601,6 @@ router.post('/chats/:chatId/send', async (req, res) => {
         finalSections = [{ title: sectionTitle, rows }];
       }
 
-      // Intentar Meta Cloud API primero si está configurado
-      const cleanPhone = chatId.replace(/[^0-9]/g, '');
-      if (metaCloudEnabled() && cleanPhone) {
-        try {
-          const metaResult = await sendMetaList(cleanPhone, {
-            body: captionText, footer: footer || '', header: header || '',
-            buttonText: btnLabel,
-            sections: finalSections
-          });
-          const listMsgId = metaResult.messages?.[0]?.id || 'meta_' + Date.now();
-          const storageJidL = normalizeStorageJid(chatId);
-          const chatNameL = getContactName(chatId) || storageJidL.split('@')[0];
-          const logTextL = '[list:meta] ' + captionText.substring(0, 50);
-          saveMessage(storageJidL, chatNameL, { messageId: listMsgId, fromMe: true, text: logTextL, type: 'list', timestamp: Date.now() }).catch(() => {});
-          upsertChat(storageJidL, chatNameL, logTextL, Date.now()).catch(() => {});
-          return res.json({ ok: true, success: true, messageId: listMsgId, btnMethod: 'meta_cloud_list' });
-        } catch (metaErr) {
-          console.error('[List] Meta Cloud fallo, usando Baileys:', metaErr.message);
-        }
-      }
-
       let listResult;
       try {
         listResult = await sendListMessageDirect(chatId, {
@@ -650,26 +629,6 @@ router.post('/chats/:chatId/send', async (req, res) => {
     } else if (type === 'buttons') {
       const captionText = caption || (typeof message === 'string' ? message : '');
       textForLog = '[btn] ' + captionText.substring(0, 50);
-
-      // === META CLOUD API PRIMERO (si está configurado) ===
-      const cleanPhone = chatId.replace(/[^0-9]/g, '');
-      if (metaCloudEnabled() && cleanPhone) {
-        try {
-          const metaResult = await sendMetaButtons(cleanPhone, {
-            body: captionText, footer: footer || '', header: header || '',
-            buttons: buttons || []
-          });
-          const metaMsgId = metaResult.messages?.[0]?.id || 'meta_' + Date.now();
-          const storageJidM = normalizeStorageJid(chatId);
-          const chatNameM = getContactName(chatId) || storageJidM.split('@')[0];
-          saveMessage(storageJidM, chatNameM, { messageId: metaMsgId, fromMe: true, text: textForLog, type: 'buttons', timestamp: Date.now() }).catch(() => {});
-          upsertChat(storageJidM, chatNameM, textForLog, Date.now()).catch(() => {});
-          console.log('[Buttons] Meta Cloud API OK:', metaMsgId);
-          return res.json({ ok: true, success: true, messageId: metaMsgId, btnMethod: 'meta_cloud' });
-        } catch (metaErr) {
-          console.error('[Buttons] Meta Cloud fallo, usando Baileys:', metaErr.message);
-        }
-      }
 
       // === FALLBACK: relay_interactive → buttonsMessage → texto ===
       const legacyBtns = (buttons || []).map((b, i) => {
