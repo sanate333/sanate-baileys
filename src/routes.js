@@ -136,7 +136,8 @@ async function sendInteractiveMessageDirect(chatId, { buffer, contentType, media
   const wamsg = generateWAMessageFromContent(jid, msgContent, {
     userJid: senderJid
   });
-  console.log('[relay-buttons] senderJid:', senderJid, '| to:', jid);
+
+  console.log('[relay-buttons] senderJid:', senderJid, '| recipient:', jid);
   await sock.relayMessage(jid, wamsg.message, { messageId: wamsg.key.id });
   return wamsg;
 }
@@ -184,7 +185,8 @@ async function sendListMessageDirect(chatId, { captionText, footerText, headerTi
   const wamsg = generateWAMessageFromContent(jid, msgContent, {
     userJid: senderJid
   });
-  console.log('[relay-list] senderJid:', senderJid, '| to:', jid);
+
+  console.log('[relay-list] senderJid:', senderJid, '| recipient:', jid);
   await sock.relayMessage(jid, wamsg.message, { messageId: wamsg.key.id });
   return wamsg;
 }
@@ -601,22 +603,26 @@ router.post('/chats/:chatId/send', async (req, res) => {
         finalSections = [{ title: sectionTitle, rows }];
       }
 
+      // === POLL — única forma visual interactiva que funciona en cuentas personales ===
+      const allRows = finalSections.flatMap(s => s.rows || []);
+      const pollValues = [...new Set(allRows.map(r => (r.title || r.rowId || '').trim()).filter(Boolean))].slice(0, 12);
       let listResult;
-      try {
-        listResult = await sendListMessageDirect(chatId, {
-          captionText, footerText: footer || '',
-          headerTitle: req.body.listTitle || req.body.title || header || '',
-          buttonText: btnLabel,
-          sections: finalSections
-        });
-      } catch (listErr) {
-        console.error('[List] nativeFlow fallo, fallback:', listErr.message);
-        listResult = await sendMessage(chatId, {
-          text: captionText, footer: footer || '',
-          title: req.body.listTitle || req.body.title || header || '',
-          buttonText: btnLabel,
-          sections: finalSections
-        });
+      let listMethod = 'text_fallback';
+      if (pollValues.length > 0) {
+        try {
+          const pollQuestion = (header ? header + '\n' : '') + captionText;
+          listResult = await sendMessage(chatId, {
+            poll: { name: pollQuestion.substring(0, 255), values: pollValues, selectableCount: 1 }
+          });
+          listMethod = 'poll_select';
+          console.log('[List] Poll enviado con', pollValues.length, 'opciones');
+        } catch (pollErr) {
+          console.error('[List] Poll fallo, fallback texto:', pollErr.message);
+        }
+      }
+      if (!listResult) {
+        listResult = await sendMessage(chatId, { text: (header ? '*' + header + '*\n\n' : '') + captionText + (footer ? '\n\n_' + footer + '_' : '') });
+        listMethod = 'text_fallback';
       }
       const listMsgId = listResult.key?.id;
       const storageJidL = normalizeStorageJid(chatId);
@@ -624,7 +630,7 @@ router.post('/chats/:chatId/send', async (req, res) => {
       const logTextL = '[list] ' + captionText.substring(0, 50);
       saveMessage(storageJidL, chatNameL, { messageId: listMsgId, fromMe: true, text: logTextL, type: 'list', timestamp: Date.now() }).catch(() => {});
       upsertChat(storageJidL, chatNameL, logTextL, Date.now()).catch(() => {});
-      return res.json({ ok: true, success: true, messageId: listMsgId, btnMethod: 'list_message' });
+      return res.json({ ok: true, success: true, messageId: listMsgId, btnMethod: listMethod });
 
     } else if (type === 'buttons') {
       const captionText = caption || (typeof message === 'string' ? message : '');
@@ -643,20 +649,25 @@ router.post('/chats/:chatId/send', async (req, res) => {
 
       let btnResult;
       let btnMethod = 'none';
-      const nativeButtons = buildNativeButtons(buttons);
 
-      try {
-        btnResult = await sendInteractiveMessageDirect(chatId, {
-          buffer: null, captionText, footerText: footer || '', nativeButtons
-        });
-        btnMethod = 'relay_interactive';
-      } catch (e1) {
+      // === POLL — única forma visual interactiva que funciona en cuentas personales ===
+      const pollBtnValues = [...new Set(legacyBtns.map(b => (b.buttonText?.displayText || '').trim()).filter(Boolean))].slice(0, 12);
+      if (pollBtnValues.length > 0) {
         try {
+          const pollQuestion = (header ? header + '\n' : '') + captionText;
           btnResult = await sendMessage(chatId, {
-            text: captionText, footer: footer || '',
-            buttons: legacyBtns, headerType: 1
+            poll: { name: pollQuestion.substring(0, 255), values: pollBtnValues, selectableCount: 1 }
           });
-          btnMethod = 'buttons_msg';
+          btnMethod = 'poll_buttons';
+          console.log('[Buttons] Poll enviado con', pollBtnValues.length, 'opciones');
+        } catch (pollErr) {
+          console.error('[Buttons] Poll fallo:', pollErr.message);
+        }
+      }
+      if (!btnResult) {
+        try {
+          btnResult = await sendMessage(chatId, { text: captionText });
+          btnMethod = 'text_fallback';
         } catch (e2) {
           btnResult = await sendMessage(chatId, { text: captionText });
           btnMethod = 'text_fallback';
