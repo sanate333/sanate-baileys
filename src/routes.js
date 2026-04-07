@@ -132,12 +132,12 @@ async function sendInteractiveMessageDirect(chatId, { buffer, contentType, media
     }
   };
 
+  const senderJid = sock.user?.id || jid;
   const wamsg = generateWAMessageFromContent(jid, msgContent, {
-    userJid: sock.user?.id || jid
+    userJid: senderJid
   });
-
-  const additionalNodes = buildInteractiveNodes(nativeButtons, jid);
-  await sock.relayMessage(jid, wamsg.message, { messageId: wamsg.key.id, additionalNodes });
+  console.log('[relay-buttons] senderJid:', senderJid, '| to:', jid);
+  await sock.relayMessage(jid, wamsg.message, { messageId: wamsg.key.id });
   return wamsg;
 }
 
@@ -180,12 +180,12 @@ async function sendListMessageDirect(chatId, { captionText, footerText, headerTi
     }
   };
 
+  const senderJid = sock.user?.id || jid;
   const wamsg = generateWAMessageFromContent(jid, msgContent, {
-    userJid: sock.user?.id || jid
+    userJid: senderJid
   });
-
-  const additionalNodes = buildInteractiveNodes([singleSelectButton], jid);
-  await sock.relayMessage(jid, wamsg.message, { messageId: wamsg.key.id, additionalNodes });
+  console.log('[relay-list] senderJid:', senderJid, '| to:', jid);
+  await sock.relayMessage(jid, wamsg.message, { messageId: wamsg.key.id });
   return wamsg;
 }
 
@@ -602,13 +602,22 @@ router.post('/chats/:chatId/send', async (req, res) => {
       }
 
       let listResult;
-      // Usar sendMessage directo (nativeFlowMessage/relayMessage falla con error status)
-      listResult = await sendMessage(chatId, {
-        text: captionText, footer: footer || '',
-        title: req.body.listTitle || req.body.title || header || '',
-        buttonText: btnLabel,
-        sections: finalSections
-      });
+      try {
+        listResult = await sendListMessageDirect(chatId, {
+          captionText, footerText: footer || '',
+          headerTitle: req.body.listTitle || req.body.title || header || '',
+          buttonText: btnLabel,
+          sections: finalSections
+        });
+      } catch (listErr) {
+        console.error('[List] nativeFlow fallo, fallback:', listErr.message);
+        listResult = await sendMessage(chatId, {
+          text: captionText, footer: footer || '',
+          title: req.body.listTitle || req.body.title || header || '',
+          buttonText: btnLabel,
+          sections: finalSections
+        });
+      }
       const listMsgId = listResult.key?.id;
       const storageJidL = normalizeStorageJid(chatId);
       const chatNameL = getContactName(chatId) || storageJidL.split('@')[0];
@@ -634,17 +643,24 @@ router.post('/chats/:chatId/send', async (req, res) => {
 
       let btnResult;
       let btnMethod = 'none';
+      const nativeButtons = buildNativeButtons(buttons);
 
-      // Usar buttons_msg directo (relay_interactive/nativeFlowMessage falla con error status)
       try {
-        btnResult = await sendMessage(chatId, {
-          text: captionText, footer: footer || '',
-          buttons: legacyBtns, headerType: 1
+        btnResult = await sendInteractiveMessageDirect(chatId, {
+          buffer: null, captionText, footerText: footer || '', nativeButtons
         });
-        btnMethod = 'buttons_msg';
+        btnMethod = 'relay_interactive';
       } catch (e1) {
-        btnResult = await sendMessage(chatId, { text: captionText });
-        btnMethod = 'text_fallback';
+        try {
+          btnResult = await sendMessage(chatId, {
+            text: captionText, footer: footer || '',
+            buttons: legacyBtns, headerType: 1
+          });
+          btnMethod = 'buttons_msg';
+        } catch (e2) {
+          btnResult = await sendMessage(chatId, { text: captionText });
+          btnMethod = 'text_fallback';
+        }
       }
 
       const btnMsgId = btnResult.key?.id;
