@@ -602,22 +602,13 @@ router.post('/chats/:chatId/send', async (req, res) => {
       }
 
       let listResult;
-      try {
-        listResult = await sendListMessageDirect(chatId, {
-          captionText, footerText: footer || '',
-          headerTitle: req.body.listTitle || req.body.title || header || '',
-          buttonText: btnLabel,
-          sections: finalSections
-        });
-      } catch (listProtoErr) {
-        console.error('[List] proto fallo, fallback:', listProtoErr.message);
-        listResult = await sendMessage(chatId, {
-          text: captionText, footer: footer || '',
-          title: req.body.listTitle || req.body.title || header || '',
-          buttonText: btnLabel,
-          sections: finalSections
-        });
-      }
+      // Usar sendMessage directo (nativeFlowMessage/relayMessage falla con error status)
+      listResult = await sendMessage(chatId, {
+        text: captionText, footer: footer || '',
+        title: req.body.listTitle || req.body.title || header || '',
+        buttonText: btnLabel,
+        sections: finalSections
+      });
       const listMsgId = listResult.key?.id;
       const storageJidL = normalizeStorageJid(chatId);
       const chatNameL = getContactName(chatId) || storageJidL.split('@')[0];
@@ -630,7 +621,7 @@ router.post('/chats/:chatId/send', async (req, res) => {
       const captionText = caption || (typeof message === 'string' ? message : '');
       textForLog = '[btn] ' + captionText.substring(0, 50);
 
-      // === FALLBACK: relay_interactive → buttonsMessage → texto ===
+      // === buttonsMessage via sendMessage (relay_interactive/nativeFlowMessage falla) ===
       const legacyBtns = (buttons || []).map((b, i) => {
         let label = b.buttonText?.displayText || b.text || b.label || b.title;
         let btnId = b.id;
@@ -643,24 +634,17 @@ router.post('/chats/:chatId/send', async (req, res) => {
 
       let btnResult;
       let btnMethod = 'none';
-      const nativeButtons = buildNativeButtons(buttons);
 
+      // Usar buttons_msg directo (relay_interactive/nativeFlowMessage falla con error status)
       try {
-        btnResult = await sendInteractiveMessageDirect(chatId, {
-          buffer: null, captionText, footerText: footer || '', nativeButtons
+        btnResult = await sendMessage(chatId, {
+          text: captionText, footer: footer || '',
+          buttons: legacyBtns, headerType: 1
         });
-        btnMethod = 'relay_interactive';
+        btnMethod = 'buttons_msg';
       } catch (e1) {
-        try {
-          btnResult = await sendMessage(chatId, {
-            text: captionText, footer: footer || '',
-            buttons: legacyBtns, headerType: 1
-          });
-          btnMethod = 'buttons_msg';
-        } catch (e2) {
-          btnResult = await sendMessage(chatId, { text: captionText });
-          btnMethod = 'text_fallback';
-        }
+        btnResult = await sendMessage(chatId, { text: captionText });
+        btnMethod = 'text_fallback';
       }
 
       const btnMsgId = btnResult.key?.id;
