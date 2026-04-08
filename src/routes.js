@@ -1439,4 +1439,173 @@ router.post('/test-all', async (req, res) => {
   res.json({ ok: true, sent: results.filter(r => r.ok).length, total: results.length, results });
 });
 
+// =============================================
+// GET /catalogo — Mini-app web con botones reales para WhatsApp
+// El bot envía este link → cliente lo toca → ve botones → WhatsApp se abre con opción lista
+// =============================================
+router.get('/catalogo', (req, res) => {
+  const botNumber = process.env.BOT_NUMBER || '573215777341';
+  const storeName = process.env.STORE_NAME || 'Sánate Colombia';
+
+  const html = `<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>${storeName} - Menú</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: linear-gradient(135deg, #25D366 0%, #128C7E 100%);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 20px;
+  }
+  .logo-area {
+    text-align: center;
+    margin: 20px 0 30px;
+    color: white;
+  }
+  .logo-area h1 {
+    font-size: 26px;
+    font-weight: 700;
+    text-shadow: 0 2px 4px rgba(0,0,0,0.3);
+  }
+  .logo-area p {
+    font-size: 15px;
+    opacity: 0.9;
+    margin-top: 6px;
+  }
+  .card {
+    background: white;
+    border-radius: 20px;
+    padding: 24px 20px;
+    width: 100%;
+    max-width: 420px;
+    box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+  }
+  .card h2 {
+    font-size: 18px;
+    color: #333;
+    margin-bottom: 20px;
+    text-align: center;
+  }
+  .btn-menu {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    padding: 16px 20px;
+    margin-bottom: 12px;
+    border-radius: 14px;
+    text-decoration: none;
+    font-size: 16px;
+    font-weight: 600;
+    color: white;
+    transition: transform 0.1s, box-shadow 0.1s;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    cursor: pointer;
+    border: none;
+    background: none;
+  }
+  .btn-menu:active { transform: scale(0.97); }
+  .btn-menu .icon { font-size: 28px; margin-right: 14px; }
+  .btn-menu .label { flex: 1; }
+  .btn-menu .label span { display: block; font-size: 12px; font-weight: 400; opacity: 0.85; margin-top: 2px; }
+  .btn-menu .arrow { font-size: 20px; opacity: 0.7; }
+  .btn1 { background: linear-gradient(135deg, #FF6B6B, #ee5a24); }
+  .btn2 { background: linear-gradient(135deg, #a29bfe, #6c5ce7); }
+  .btn3 { background: linear-gradient(135deg, #fd79a8, #e84393); }
+  .btn4 { background: linear-gradient(135deg, #55efc4, #00b894); }
+  .btn5 { background: linear-gradient(135deg, #ffeaa7, #fdcb6e); color: #333; }
+  .btn6 { background: linear-gradient(135deg, #74b9ff, #0984e3); }
+  .footer {
+    margin-top: 20px;
+    text-align: center;
+    color: rgba(255,255,255,0.8);
+    font-size: 13px;
+  }
+  .wa-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: rgba(255,255,255,0.2);
+    padding: 6px 14px;
+    border-radius: 20px;
+    margin-top: 8px;
+    color: white;
+    font-size: 13px;
+  }
+</style>
+</head>
+<body>
+<div class="logo-area">
+  <h1>🌿 ${storeName}</h1>
+  <p>¿Qué te interesa hoy?</p>
+</div>
+<div class="card">
+  <h2>Toca la opción que quieras 👇</h2>
+  <a class="btn-menu btn1" href="https://wa.me/${botNumber}?text=Quiero+ver+los+Combos">
+    <span class="icon">🎁</span>
+    <span class="label">Ver Combos<span>Kits y paquetes especiales</span></span>
+    <span class="arrow">›</span>
+  </a>
+  <a class="btn-menu btn2" href="https://wa.me/${botNumber}?text=Quiero+ver+las+Cremas">
+    <span class="icon">✨</span>
+    <span class="label">Ver Cremas<span>Cuidado facial y corporal</span></span>
+    <span class="arrow">›</span>
+  </a>
+  <a class="btn-menu btn3" href="https://wa.me/${botNumber}?text=Quiero+ver+las+Ofertas">
+    <span class="icon">🔥</span>
+    <span class="label">Ofertas del día<span>Descuentos y promociones</span></span>
+    <span class="arrow">›</span>
+  </a>
+  <a class="btn-menu btn4" href="https://wa.me/${botNumber}?text=Quiero+informacion+de+envios">
+    <span class="icon">🚚</span>
+    <span class="label">Envíos<span>Tiempos y costos de entrega</span></span>
+    <span class="arrow">›</span>
+  </a>
+  <a class="btn-menu btn5" href="https://wa.me/${botNumber}?text=Quiero+ver+el+catalogo+completo">
+    <span class="icon">📋</span>
+    <span class="label">Catálogo completo<span>Todos nuestros productos</span></span>
+    <span class="arrow">›</span>
+  </a>
+  <a class="btn-menu btn6" href="https://wa.me/${botNumber}?text=Quiero+hablar+con+un+asesor">
+    <span class="icon">💬</span>
+    <span class="label">Hablar con asesor<span>Atención personalizada</span></span>
+    <span class="arrow">›</span>
+  </a>
+</div>
+<div class="footer">
+  <div class="wa-badge">📱 Abre WhatsApp automáticamente</div>
+</div>
+</body>
+</html>`;
+
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(html);
+});
+
+// POST /send-catalogo — El bot envía el link del catálogo a un número
+router.post('/send-catalogo', async (req, res) => {
+  try {
+    const { to } = req.body;
+    if (!to) return res.status(400).json({ error: 'Falta to' });
+    const cleanTo = to.replace(/[^0-9]/g, '');
+    const jid = cleanTo + '@s.whatsapp.net';
+    const sock = getSocket();
+    if (!sock) return res.status(503).json({ error: 'Socket no disponible' });
+
+    const catalogUrl = `https://sanate-wa-bot.onrender.com/api/whatsapp/catalogo`;
+    const msg = `🌿 *Catálogo Sánate Colombia*\n\nToca el botón aquí abajo para ver nuestro menú completo con opciones tapeables 👇\n\n${catalogUrl}\n\n_Abre el link y selecciona lo que te interesa_ ✨`;
+
+    await sock.sendMessage(jid, { text: msg });
+    res.json({ ok: true, to: cleanTo, url: catalogUrl });
+  } catch(e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 module.exports = router;
