@@ -1,14 +1,22 @@
 /* ══════════════════════════════════════════════════════════════════════
-   SANATE VISUAL PATCH v2.2 — Chat UX Improvements
+   SANATE VISUAL PATCH v2.3
    - Ticks más grandes y colores correctos (gris=entregado, azul=leído)
    - "🤖 Respondiendo..." en sidebar cuando bot está generando respuesta
    - "✍️ Escribiendo..." en sidebar cuando el cliente está escribiendo
+   FIX v2.3:
+   - ✍️ Escribiendo: timeout reducido 6s→3s + limpieza al salir del chat
+   - ✓✓ azul: no re-aplicar estado "leído" a mensajes nuevos sin confirmar
    ══════════════════════════════════════════════════════════════════════ */
 (function () {
   'use strict';
-  if (window.__sanateVisualV2 && window.__sanateVisualV2version === '2.2') return;
+  if (window.__sanateVisualV2 && window.__sanateVisualV2version === '2.3') return;
+  // Eliminar versión anterior si existe
+  if (window.__sanateVisualV2) {
+    var oldCss = document.getElementById('sanate-visual-v2-css');
+    if (oldCss) oldCss.remove();
+  }
   window.__sanateVisualV2 = true;
-  window.__sanateVisualV2version = '2.2';
+  window.__sanateVisualV2version = '2.3';
 
   const BOT_SSE = 'https://sanate-wa-bot.onrender.com/api/whatsapp/events';
 
@@ -43,6 +51,8 @@
   const botTypingChats = new Set();
   const msgStatusMap   = new Map();   // messageId → statusName
   const chatStatusMap  = new Map();   // chatId → statusName
+  // FIX v2.3: rastrear chats con mensajes nuevos sin confirmación de lectura
+  const chatHasNewMsg  = new Set();   // chatIds con mensajes recién enviados
 
   /* ── 3. SSE ────────────────────────────────────────────────────────── */
   function conectarSSE() {
@@ -73,16 +83,20 @@
       const { id, presences } = data.data || {};
       const chatId = (id || '').split('@')[0];
       if (!chatId) return;
+      // Solo procesar presencia del contacto remoto (clave = id del chat)
       const p = (presences || {})[id] || {};
       const estado = p.lastKnownPresence;
-      if (estado === 'composing') {
+      if (estado === 'composing' || estado === 'recording') {
+        // FIX v2.3: solo mostrar si no es nuestro propio número
         if (!botTypingChats.has(chatId)) actualizarSidebar(chatId, 'escribiendo');
         clearTimeout(typingTimeouts.get(chatId));
+        // FIX v2.3: timeout reducido de 6000ms a 3000ms
         typingTimeouts.set(chatId, setTimeout(() => {
           typingTimeouts.delete(chatId);
           if (!botTypingChats.has(chatId)) actualizarSidebar(chatId, null);
-        }, 6000));
+        }, 3000));
       } else {
+        // paused / available / unavailable → limpiar inmediatamente
         clearTimeout(typingTimeouts.get(chatId));
         typingTimeouts.delete(chatId);
         if (!botTypingChats.has(chatId)) actualizarSidebar(chatId, null);
@@ -99,6 +113,10 @@
           const prev = chatStatusMap.get(d.chatId);
           if ((order[d.statusName] || 0) > (order[prev] || 0)) {
             chatStatusMap.set(d.chatId, d.statusName);
+            // FIX v2.3: cuando llega confirmación real, quitar la marca de "mensaje nuevo"
+            if (d.statusName === 'read' || d.statusName === 'played' || d.statusName === 'delivered') {
+              chatHasNewMsg.delete(d.chatId);
+            }
             actualizarTicksChat(d.chatId, d.statusName);
           }
         }
@@ -107,7 +125,6 @@
   }
 
   /* ── TICKS DEL CHAT ABIERTO ────────────────────────────────────────── */
-  /* En WhatsApp al leer un mensaje, TODOS los anteriores quedan como leídos */
   function actualizarTicksChat(chatId, statusName) {
     const nameEl = document.querySelector('.wbv5-cw-name');
     if (!nameEl) return;
@@ -196,18 +213,62 @@
         span.classList.add('sanate-tick-text');
       }
     });
-    /* Re-aplicar status del chat abierto (ej: al navegar) */
+    /* FIX v2.3: Re-aplicar status del chat abierto SOLO si no hay mensajes
+       sin confirmación (tick simple ✓) que podrían colorearse incorrectamente */
     const nameEl = document.querySelector('.wbv5-cw-name');
     if (nameEl) {
       const openD = (nameEl.textContent || '').replace(/\D/g, '').slice(-9);
       for (const [cId, sName] of chatStatusMap) {
-        if (String(cId).replace(/\D/g,'').slice(-9) === openD) { actualizarTicksChat(cId, sName); break; }
+        if (String(cId).replace(/\D/g,'').slice(-9) === openD) {
+          // FIX: no re-aplicar "read" si hay mensajes nuevos sin confirmar
+          if (chatHasNewMsg.has(cId)) break;
+          // FIX: no re-aplicar si hay ticks simples ✓ (mensaje reciên enviado)
+          const hasSingleTick = [...document.querySelectorAll('.wbv5-msg.s .wbv5-msg-time span')]
+            .some(s => (s.textContent || '').trim() === '✓');
+          if (!hasSingleTick) {
+            actualizarTicksChat(cId, sName);
+          }
+          break;
+        }
+      }
+    }
+  }
+
+  /* FIX v2.3: Detectar nuevos mensajes salientes para evitar ticks azules falsos */
+  function detectarMensajeNuevo(mutations) {
+    for (const mutation of mutations) {
+      for (const node of mutation.addedNodes) {
+        if (node.nodeType !== 1) continue;
+        // Buscar el mensaje saliente recién añadido
+        const esMsgSaliente = node.classList && node.classList.contains('wbv5-msg') && node.classList.contains('s');
+        const contieneMsgSaliente = !esMsgSaliente && node.querySelector && node.querySelector('.wbv5-msg.s');
+        if (esMsgSaliente || contieneMsgSaliente) {
+          // Obtener chat actual y marcarlo como "tiene mensaje nuevo"
+          const nameEl = document.querySelector('.wbv5-cw-name');
+          if (nameEl) {
+            const openD = (nameEl.textContent || '').replace(/\D/g, '').slice(-9);
+            for (const [cId] of chatStatusMap) {
+              if (String(cId).replace(/\D/g,'').slice(-9) === openD) {
+                chatHasNewMsg.add(cId);
+                // Resetear estado: el nuevo mensaje empieza como "sent"
+                chatStatusMap.set(cId, 'sent');
+                console.log('[Sánate Visual v2] Nuevo mensaje → reset estado chat', openD);
+                break;
+              }
+            }
+          }
+          break;
+        }
       }
     }
   }
 
   let scanTimer = null;
-  const observer = new MutationObserver(() => { clearTimeout(scanTimer); scanTimer = setTimeout(reescanearTicks, 250); });
+  const observer = new MutationObserver((mutations) => {
+    detectarMensajeNuevo(mutations);
+    clearTimeout(scanTimer);
+    scanTimer = setTimeout(reescanearTicks, 250);
+  });
   observer.observe(document.body, { childList: true, subtree: true, attributes: false });
 
   /* ── INIT ──────────────────────────────────────────────────────────── */
