@@ -1,31 +1,43 @@
 /* ═══════════════════════════════════════════════════════════════
-   SANATE HOTFIX v6.4 — Fix Encuesta → Texto plano
-   Redirige /chats/:id/send al proxy Supabase v2 (chatId en body)
+   SANATE HOTFIX v6.5 — Fix Encuesta → Texto plano
+   Soporta FormData (campo "text") y JSON (campo "message")
+   Redirige al proxy Supabase v2 con chatId en body
    ═══════════════════════════════════════════════════════════════ */
 (function () {
   'use strict';
-  if (window.__sanateHotfixV64) return;
-  window.__sanateHotfixV64 = true;
+  if (window.__sanateHotfixV65) return;
+  window.__sanateHotfixV65 = true;
 
   var PROXY_URL = 'https://lvmeswlvszsmvgaasazs.supabase.co/functions/v1/send-proxy';
 
-  /* ── FETCH INTERCEPTOR: redirige send al proxy v2 (chatId en body) ── */
+  /* ── FETCH INTERCEPTOR: soporta FormData + JSON ── */
   var _origFetch = window.fetch.bind(window);
   window.fetch = function (url, opts) {
     try {
       if (typeof url === 'string' && /\/chats\/([^\/]+)\/send/.test(url) &&
           opts && opts.method === 'POST') {
-        var match = url.match(/\/chats\/([^\/]+)\/send/);
-        var chatId = match ? match[1] : null;
-        if (chatId) {
-          /* Proxy v2: chatId va en el body, NO en la URL → evita CORS preflight */
-          var bodyObj = {};
-          try { bodyObj = JSON.parse(opts.body || '{}'); } catch (pe) {}
-          bodyObj.chatId = chatId;
+        var chatId = url.match(/\/chats\/([^\/]+)\/send/)[1];
+        var msg = '';
+
+        if (opts.body instanceof FormData) {
+          /* Dashboard envía FormData con campo "text" */
+          opts.body.forEach(function (v, k) {
+            if (k === 'text' || k === 'message') msg = String(v);
+          });
+        } else {
+          /* JSON body */
+          try {
+            var parsed = JSON.parse(opts.body || '{}');
+            msg = parsed.message || parsed.text || '';
+          } catch (pe) {}
+        }
+
+        if (msg) {
+          /* Redirigir al proxy Supabase — convierte a text_fallback */
           return _origFetch(PROXY_URL, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(bodyObj)
+            body: JSON.stringify({ chatId: chatId, message: msg })
           });
         }
       }
@@ -155,7 +167,7 @@
     .observe(document.body, { childList: true, subtree: true, attributes: false });
 
   setTimeout(function () { conectarSSE(); reescanearTicks(); }, 1500);
-  console.log('[Sánate v6.4] ✅ proxy v2 activo — send redirigido (chatId en body) para texto plano');
+  console.log('[Sánate v6.5] ✅ proxy v2 activo — FormData+JSON soportados, sin encuestas');
 })();
 
 /* ═══════════════════════════════════════════════════════════════
@@ -313,5 +325,5 @@ function tryInject(){
 var obs=new MutationObserver(function(){ tryInject(); });
 obs.observe(document.body,{childList:true,subtree:true});
 setTimeout(tryInject,800); setTimeout(tryInject,2000);
-console.log('[WABA+Sánate v6.4] cargado — proxy v2 activo (chatId en body)');
+console.log('[WABA+Sánate v6.5] cargado — FormData+JSON, sin encuestas');
 })();
