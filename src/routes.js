@@ -595,27 +595,17 @@ router.post('/chats/:chatId/send', async (req, res) => {
         finalSections = [{ title: sectionTitle, rows }];
       }
 
-      // === POLL — única forma visual interactiva que funciona en cuentas personales ===
+      // Enviar lista como texto formateado (sin poll — polls causan confusión en el cliente)
       const allRows = finalSections.flatMap(s => s.rows || []);
-      const pollValues = [...new Set(allRows.map(r => (r.title || r.rowId || '').trim()).filter(Boolean))].slice(0, 12);
+      let listText = (header ? '*' + header + '*\n\n' : '') + captionText;
+      if (allRows.length > 0) {
+        listText += '\n\n' + allRows.map((r, i) => `${i + 1}. ${r.title}${r.description ? '\n   _' + r.description + '_' : ''}`).join('\n');
+      }
+      if (footer) listText += '\n\n_' + footer + '_';
       let listResult;
-      let listMethod = 'text_fallback';
-      if (pollValues.length > 0) {
-        try {
-          const pollQuestion = (header ? header + '\n' : '') + captionText;
-          listResult = await sendMessage(chatId, {
-            poll: { name: pollQuestion.substring(0, 255), values: pollValues, selectableCount: 1 }
-          });
-          listMethod = 'poll_select';
-          console.log('[List] Poll enviado con', pollValues.length, 'opciones');
-        } catch (pollErr) {
-          console.error('[List] Poll fallo, fallback texto:', pollErr.message);
-        }
-      }
-      if (!listResult) {
-        listResult = await sendMessage(chatId, { text: (header ? '*' + header + '*\n\n' : '') + captionText + (footer ? '\n\n_' + footer + '_' : '') });
-        listMethod = 'text_fallback';
-      }
+      let listMethod = 'text_list';
+      listResult = await sendMessage(chatId, { text: listText });
+      console.log('[List] Enviado como texto formateado');
       const listMsgId = listResult.key?.id;
       const storageJidL = normalizeStorageJid(chatId);
       const chatNameL = getContactName(chatId) || storageJidL.split('@')[0];
@@ -640,31 +630,16 @@ router.post('/chats/:chatId/send', async (req, res) => {
       });
 
       let btnResult;
-      let btnMethod = 'none';
+      let btnMethod = 'text';
 
-      // === POLL — única forma visual interactiva que funciona en cuentas personales ===
-      const pollBtnValues = [...new Set(legacyBtns.map(b => (b.buttonText?.displayText || '').trim()).filter(Boolean))].slice(0, 12);
-      if (pollBtnValues.length > 0) {
-        try {
-          const pollQuestion = (header ? header + '\n' : '') + captionText;
-          btnResult = await sendMessage(chatId, {
-            poll: { name: pollQuestion.substring(0, 255), values: pollBtnValues, selectableCount: 1 }
-          });
-          btnMethod = 'poll_buttons';
-          console.log('[Buttons] Poll enviado con', pollBtnValues.length, 'opciones');
-        } catch (pollErr) {
-          console.error('[Buttons] Poll fallo:', pollErr.message);
-        }
+      // Enviar como texto con opciones numeradas (sin poll — polls causan confusión)
+      let btnText = (header ? '*' + header + '*\n\n' : '') + captionText;
+      if (legacyBtns.length > 0) {
+        btnText += '\n\n' + legacyBtns.map((b, i) => `${i + 1}. ${b.buttonText?.displayText || 'Opción ' + (i + 1)}`).join('\n');
       }
-      if (!btnResult) {
-        try {
-          btnResult = await sendMessage(chatId, { text: captionText });
-          btnMethod = 'text_fallback';
-        } catch (e2) {
-          btnResult = await sendMessage(chatId, { text: captionText });
-          btnMethod = 'text_fallback';
-        }
-      }
+      if (footer) btnText += '\n\n_' + footer + '_';
+      btnResult = await sendMessage(chatId, { text: btnText });
+      console.log('[Buttons] Enviado como texto formateado');
 
       const btnMsgId = btnResult.key?.id;
       const storageJidB = normalizeStorageJid(chatId);

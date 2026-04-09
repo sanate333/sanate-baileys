@@ -158,6 +158,13 @@ async function connectToWhatsApp() {
       const messageType = getMessageType(msg);
       const timestamp = msg.messageTimestamp;
 
+      // Saltar mensajes fromMe sin texto legible (protocol msgs, ACKs, mensajes del bot
+      // ya guardados por auto-reply.js/routes.js) — evita bubbles vacíos en el dashboard
+      if (fromMe && !messageText && messageType === 'other') {
+        console.log('[SKIP] fromMe sin texto legible, tipo=other, id=' + msg.key.id?.substring(0, 8));
+        continue;
+      }
+
       if (pushName && !isGroup) contactCache.set(chatId, pushName);
 
       console.log((fromMe ? '-> ' : '<- ') + senderName + ': ' + (messageText || '').substring(0, 50) + ' [' + messageType + ']');

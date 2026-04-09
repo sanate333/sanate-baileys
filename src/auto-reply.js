@@ -336,17 +336,17 @@ async function processReply(chatJid, pushName) {
 
     addToHistory(chatJid, 'model', reply);
 
-    if (aiConfig.msgMode !== 'partes') {
-      const { saveMessage, upsertChat } = require('./supabase');
-      await saveMessage(chatJid, 'Sanate Bot', {
-        messageId: 'bot_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6),
-        text: reply,
-        type: 'text',
-        fromMe: true,
-        timestamp: Math.floor(Date.now() / 1000),
-      });
-      await upsertChat(chatJid, null, reply, Math.floor(Date.now() / 1000));
-    }
+    // Guardar siempre en Supabase (modo partes y modo completo)
+    const { saveMessage, upsertChat } = require('./supabase');
+    const storageJid = chatJid.includes('@') ? chatJid.split('@')[0] : chatJid;
+    await saveMessage(storageJid, 'Sanate Bot', {
+      messageId: 'bot_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6),
+      text: reply,
+      type: 'text',
+      fromMe: true,
+      timestamp: Math.floor(Date.now() / 1000),
+    });
+    await upsertChat(storageJid, null, reply, Math.floor(Date.now() / 1000));
 
   } catch (err) {
     console.error('Error en processReply:', err.message);
