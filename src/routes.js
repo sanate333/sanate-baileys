@@ -468,18 +468,7 @@ router.post('/chats/:chatId/send', async (req, res) => {
     let { mediaUrl, caption, header, footer, buttons } = req.body;
     if (!chatId || !message) return res.status(400).json({ error: 'chatId y message son requeridos' });
 
-    // Auto-convert dashboard text messages to interactive buttons via Meta Cloud API (server-side SBI)
-    const SANATE_BUTTONS_DEFAULT = [
-      { text: '\uD83D\uDCE6 Ver mis pedidos', id: 'ver_pedidos' },
-      { text: '\uD83D\uDCAC Hablar asesor', id: 'hablar_asesor' },
-      { text: '\u274C No gracias', id: 'no_gracias' }
-    ];
-    if (type === 'text' && !mediaUrl) {
-      type = 'buttons';  // Meta Cloud API → botones reales en WhatsApp
-      caption = caption || (typeof message === 'string' ? message : '');
-      buttons = (buttons && buttons.length > 0) ? buttons : SANATE_BUTTONS_DEFAULT;
-      console.log('[SBI-server] Convirtiendo texto → botones Meta Cloud:', caption.substring(0, 60));
-    }
+    // type='text' se envía como texto plano — sin conversión a botones/poll
 
     let content;
     let textForLog = typeof message === 'string' ? message : message.caption || '';
