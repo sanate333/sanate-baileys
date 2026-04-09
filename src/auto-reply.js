@@ -14,6 +14,7 @@
 
 let supabaseClient = null;
 let sock = null;
+let sseManager = null;
 
 // --- In-memory config (loaded from Supabase on init) ---
 let aiConfig = {
@@ -59,6 +60,10 @@ async function initAutoReply(supabase, socket) {
 
 function updateSocket(socket) {
   sock = socket;
+}
+
+function setSseManager(sse) {
+  sseManager = sse;
 }
 
 // ===================== CONFIG (Supabase persistence) =====================
@@ -204,13 +209,15 @@ async function processReply(chatJid, pushName) {
     return;
   }
 
+  let keepTypingInterval = null;
   try {
-    // Send typing indicator
-    try {
-      await sock.sendPresenceUpdate('composing', chatJid);
-    } catch (e) {
-      console.log('Presence update error:', e.message);
-    }
+    // Typing indicator: inmediato + mantener vivo cada 10s mientras la IA procesa
+    // (WhatsApp auto-cancela el indicador luego de ~25s si no se renueva)
+    try { await sock.sendPresenceUpdate('composing', chatJid); } catch (e) {}
+    if (sseManager) sseManager.broadcast({ type: 'bot_typing', data: { chatId: chatJid.split('@')[0], typing: true } });
+    keepTypingInterval = setInterval(async () => {
+      try { await sock.sendPresenceUpdate('composing', chatJid); } catch (e) {}
+    }, 10000);
 
     let systemPrompt = aiConfig.systemPrompt || 'Eres un asistente de ventas amable para Sanate, tienda de cosmeticos naturales.';
 
@@ -319,9 +326,6 @@ async function processReply(chatJid, pushName) {
       console.log('BOT -> ' + chatJid.split('@')[0] + ': ' + reply.substring(0, 80));
     }
 
-    // Stop typing indicator
-    try { await sock.sendPresenceUpdate('paused', chatJid); } catch(e) {}
-
     lastReplyTime.set(chatJid, Date.now());
     usageStats.totalReplies++;
     // Daily counter
@@ -348,6 +352,9 @@ async function processReply(chatJid, pushName) {
     console.error('Error en processReply:', err.message);
     usageStats.errors++;
   } finally {
+    clearInterval(keepTypingInterval);
+    try { await sock.sendPresenceUpdate('paused', chatJid); } catch (e) {}
+    if (sseManager) sseManager.broadcast({ type: 'bot_typing', data: { chatId: chatJid.split('@')[0], typing: false } });
     replyLocks.delete(chatJid);
   }
 }
@@ -642,4 +649,5 @@ module.exports = {
   setConfig,
   getUsageStats,
   loadConfigFromSupabase,
+  setSseManager,
 };

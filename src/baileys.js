@@ -4,7 +4,7 @@ const pino = require('pino');
 const NodeCache = require('node-cache');
 const { saveMessage, upsertChat, syncInitialChats } = require('./supabase');
 const { useSupabaseAuthState, clearAuth, clearLocalAuth, saveAuthToSupabase } = require('./auth-store');
-const { handleIncomingMessage, updateSocket } = require('./auto-reply');
+const { handleIncomingMessage, updateSocket, setSseManager } = require('./auto-reply');
 
 let sock = null;
 let qrCode = null;
@@ -28,6 +28,7 @@ function getConnectionState() { return connectionState; }
 async function initBaileys(supabase, sse) {
   supabaseClient = supabase;
   sseManager = sse;
+  setSseManager(sse); // Pasar SSE manager a auto-reply para eventos bot_typing
   await connectToWhatsApp();
 }
 

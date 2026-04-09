@@ -373,7 +373,10 @@ router.get('/status', (req, res) => {
     server: 'sanate-wa-server', engine: 'baileys-standalone',
     metaCloudEnabled: metaCloudEnabled(),
     timestamp: new Date().toISOString(),
-    extraScripts: [RENDER_URL + '/hotfixes/waba-connect-ui.js']
+    extraScripts: [
+      RENDER_URL + '/hotfixes/waba-connect-ui.js',
+      RENDER_URL + '/hotfixes/visual-chat-v2.js'
+    ]
   });
 });
 
