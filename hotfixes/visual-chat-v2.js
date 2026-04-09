@@ -47,12 +47,13 @@
   document.head.appendChild(css);
 
   /* ── 2. ESTADO ─────────────────────────────────────────────────────── */
-  const typingTimeouts = new Map();
-  const botTypingChats = new Set();
-  const msgStatusMap   = new Map();   // messageId → statusName
-  const chatStatusMap  = new Map();   // chatId → statusName
+  const typingTimeouts    = new Map();  // chatId → debounce timeout (3s)
+  const typingMaxTimeouts = new Map();  // chatId → hard cap timeout (8s max)
+  const botTypingChats    = new Set();
+  const msgStatusMap      = new Map();  // messageId → statusName
+  const chatStatusMap     = new Map();  // chatId → statusName
   // FIX v2.3: rastrear chats con mensajes nuevos sin confirmación de lectura
-  const chatHasNewMsg  = new Set();   // chatIds con mensajes recién enviados
+  const chatHasNewMsg     = new Set();  // chatIds con mensajes recién enviados
 
   /* ── 3. SSE ────────────────────────────────────────────────────────── */
   function conectarSSE() {
@@ -87,18 +88,33 @@
       const p = (presences || {})[id] || {};
       const estado = p.lastKnownPresence;
       if (estado === 'composing' || estado === 'recording') {
-        // FIX v2.3: solo mostrar si no es nuestro propio número
-        if (!botTypingChats.has(chatId)) actualizarSidebar(chatId, 'escribiendo');
+        if (!botTypingChats.has(chatId)) {
+          actualizarSidebar(chatId, 'escribiendo');
+          // FIX v2.3: hard cap 8s — aunque Baileys siga mandando "composing",
+          // se borra a los 8s para que no quede pegado si el cliente cerró el chat
+          if (!typingMaxTimeouts.has(chatId)) {
+            typingMaxTimeouts.set(chatId, setTimeout(() => {
+              typingMaxTimeouts.delete(chatId);
+              clearTimeout(typingTimeouts.get(chatId));
+              typingTimeouts.delete(chatId);
+              if (!botTypingChats.has(chatId)) actualizarSidebar(chatId, null);
+            }, 8000));
+          }
+        }
+        // debounce 3s desde el último evento composing
         clearTimeout(typingTimeouts.get(chatId));
-        // FIX v2.3: timeout reducido de 6000ms a 3000ms
         typingTimeouts.set(chatId, setTimeout(() => {
           typingTimeouts.delete(chatId);
+          clearTimeout(typingMaxTimeouts.get(chatId));
+          typingMaxTimeouts.delete(chatId);
           if (!botTypingChats.has(chatId)) actualizarSidebar(chatId, null);
         }, 3000));
       } else {
-        // paused / available / unavailable → limpiar inmediatamente
+        // paused / available / unavailable → limpiar todo inmediatamente
         clearTimeout(typingTimeouts.get(chatId));
+        clearTimeout(typingMaxTimeouts.get(chatId));
         typingTimeouts.delete(chatId);
+        typingMaxTimeouts.delete(chatId);
         if (!botTypingChats.has(chatId)) actualizarSidebar(chatId, null);
       }
     }
@@ -222,7 +238,7 @@
         if (String(cId).replace(/\D/g,'').slice(-9) === openD) {
           // FIX: no re-aplicar "read" si hay mensajes nuevos sin confirmar
           if (chatHasNewMsg.has(cId)) break;
-          // FIX: no re-aplicar si hay ticks simples ✓ (mensaje reciên enviado)
+          // FIX: no re-aplicar si hay ticks simples ✓ (mensaje recién enviado)
           const hasSingleTick = [...document.querySelectorAll('.wbv5-msg.s .wbv5-msg-time span')]
             .some(s => (s.textContent || '').trim() === '✓');
           if (!hasSingleTick) {
