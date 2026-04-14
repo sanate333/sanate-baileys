@@ -177,9 +177,12 @@ async function connectToWhatsApp() {
         timestamp: timestamp ? (typeof timestamp === 'object' ? timestamp.low : timestamp) : Math.floor(Date.now() / 1000)
       });
 
-      await upsertChat(storageId, senderName, messageText || '[' + messageType + ']',
-        typeof timestamp === 'object' ? timestamp.low : timestamp
-      );
+      /* Solo guardar en lista de chats si NO es grupo — grupos no deben aparecer en Clientes */
+      if (!isGroup) {
+        await upsertChat(storageId, senderName, messageText || '[' + messageType + ']',
+          typeof timestamp === 'object' ? timestamp.low : timestamp
+        );
+      }
 
       if (sseManager) sseManager.broadcast({
         type: 'message',
