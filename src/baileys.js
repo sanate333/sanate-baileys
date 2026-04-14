@@ -2,7 +2,7 @@ const { default: makeWASocket, DisconnectReason, fetchLatestBaileysVersion, make
 const { Boom } = require('@hapi/boom');
 const pino = require('pino');
 const NodeCache = require('node-cache');
-const { saveMessage, upsertChat, syncInitialChats } = require('./supabase');
+const { saveMessage, upsertChat, syncInitialChats, updateMessageStatus } = require('./supabase');
 const { useSupabaseAuthState, clearAuth, clearLocalAuth, saveAuthToSupabase } = require('./auth-store');
 const { handleIncomingMessage, updateSocket, setSseManager } = require('./auto-reply');
 
@@ -206,12 +206,14 @@ async function connectToWhatsApp() {
   });
 
   // Track message delivery/read status
-  sock.ev.on('messages.update', (updates) => {
+  sock.ev.on('messages.update', async (updates) => {
     for (const { key, update } of updates) {
       if (update.status !== undefined) {
         const statusMap = { 0: 'error', 1: 'pending', 2: 'sent', 3: 'delivered', 4: 'read', 5: 'played' };
         const statusName = statusMap[update.status] || 'unknown';
         console.log('MSG STATUS:', key.remoteJid?.split('@')[0], key.id?.substring(0,8), '->', statusName);
+        // Persistir status en Supabase para que ticks sobrevivan recarga
+        try { await updateMessageStatus(key.id, statusName); } catch(e) {}
         if (sseManager) sseManager.broadcast({
           type: 'message_status',
           data: {
