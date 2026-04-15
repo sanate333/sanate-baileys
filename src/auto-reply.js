@@ -165,10 +165,21 @@ async function handleIncomingMessage(chatJid, messageText, pushName, messageId) 
   if (!messageText || messageText.trim().length === 0) return;
   if (!sock) return;
 
-  if (aiConfig.msgMode === 'contacts') {
-    if (!aiConfig.contactMap[chatJid]) return;
+  /* Filtro por contacto — independiente de msgMode:
+     Si existe contactMap con entradas, solo responder donde el valor es explicitamente true.
+     Esto permite usar msgMode='partes' para el formato SIN desactivar el filtro. */
+  const contactMap = aiConfig.contactMap || {};
+  const hasContactEntries = Object.values(contactMap).some(v => v === true || v === false);
+  if (hasContactEntries) {
+    // Hay entradas explicitas → solo responder donde value === true
+    if (contactMap[chatJid] !== true) {
+      // Buscar por numero (sin @) tambien
+      const jidNum = chatJid.replace(/[^0-9]/g, '');
+      const matchByNum = Object.keys(contactMap).find(k => k.replace(/[^0-9]/g,'') === jidNum && contactMap[k] === true);
+      if (!matchByNum) return;
+    }
   }
-  if (aiConfig.contactMap[chatJid] === false) return;
+  if (contactMap[chatJid] === false) return;
 
   if (processedReplies.has(messageId)) return;
   processedReplies.add(messageId);
@@ -262,7 +273,20 @@ async function processReply(chatJid, pushName) {
       systemPrompt += '\nCada parrafo debe tener 1-3 oraciones como un mensaje de WhatsApp real.';
       systemPrompt += '\nNUNCA envies un emoji solo como parrafo separado.';
       systemPrompt += '\nNUNCA cortes numeros/precios entre parrafos.';
-    systemPrompt += '\nNUNCA dejes una respuesta incompleta. Si listas opciones, SIEMPRE incluye TODAS (minimo 3 opciones de combos cuando el cliente pregunte por un producto).';
+      systemPrompt += '\nNUNCA dejes una respuesta incompleta. Si listas opciones, SIEMPRE incluye TODAS (minimo 3 opciones de combos cuando el cliente pregunte por un producto).';
+      systemPrompt += '\n\n=== PATRON DE CIERRE DE VENTA (OBLIGATORIO) ===';
+      systemPrompt += '\nCuando el cliente dice "quiero", "me llevo", "si", elige una opcion o pide hacer pedido:';
+      systemPrompt += '\n1. Parrafo 1: Confirma producto + cantidad + precio. Menciona bonus/regalo si aplica.';
+      systemPrompt += '\n2. Parrafo 2: Pide o confirma direccion de envio (si la tienes guardada, muestrala y pide confirmacion).';
+      systemPrompt += '\n3. Parrafo 3: Confirma total con o sin envio.';
+      systemPrompt += '\n4. Parrafo 4: Pregunta metodo de pago: "contra entrega o transferencia?".';
+      systemPrompt += '\nNO sigas vendiendo despues de que el cliente eligio. Pasa DIRECTAMENTE a recoger datos.';
+      systemPrompt += '\n\n=== COMO PRESENTAR COMBOS/PRECIOS ===';
+      systemPrompt += '\nCuando el cliente pregunte por precios o combos:';
+      systemPrompt += '\n- Parrafo 1: Pregunta diagnostico (para que zona? manchas o acne? etc)';
+      systemPrompt += '\n- Solo si YA tienes contexto: muestra 2-3 combos relevantes, uno por parrafo';
+      systemPrompt += '\n- NO listes todos los combos de una sola vez';
+      systemPrompt += '\n- Termina con una pregunta de seleccion especifica';
     } else {
       systemPrompt += '\n\nUSO DE EMOJIS (modo completo):';
       systemPrompt += '\n- Usa MAXIMO 1-2 emojis en TODA tu respuesta.';
