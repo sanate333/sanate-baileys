@@ -1134,6 +1134,51 @@ router.get('/ai-usage', (req, res) => {
   try { res.json(getUsageStats()); }
   catch (err) { res.status(500).json({ error: err.message }); }
 });
+// =============================================
+// GET /templates — Lee plantillas desde Supabase
+// =============================================
+router.get('/templates', async (req, res) => {
+  try {
+    const { createClient } = require('@supabase/supabase-js');
+    const supabase = createClient(
+      process.env.SUPABASE_URL,
+      process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_ANON_KEY
+    );
+    const { data, error } = await supabase
+      .from('oasis_wa_config')
+      .select('system_prompt')
+      .eq('id', 'wa_templates')
+      .single();
+    if (error || !data) return res.json([]);
+    const templates = JSON.parse(data.system_prompt || '[]');
+    res.json(templates);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// =============================================
+// POST /templates — Guarda/actualiza plantillas
+// =============================================
+router.post('/templates', async (req, res) => {
+  try {
+    const templates = req.body;
+    if (!Array.isArray(templates)) return res.status(400).json({ error: 'Se esperaba un array' });
+    const { createClient } = require('@supabase/supabase-js');
+    const supabase = createClient(
+      process.env.SUPABASE_URL,
+      process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_ANON_KEY
+    );
+    const { error } = await supabase
+      .from('oasis_wa_config')
+      .upsert({ id: 'wa_templates', system_prompt: JSON.stringify(templates) });
+    if (error) throw error;
+    res.json({ ok: true, count: templates.length });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 
 // =============================================
 // WABA MULTI-TIENDA — Botones reales por número
