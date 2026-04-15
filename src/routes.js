@@ -756,6 +756,51 @@ router.post('/chats/:chatId/send', async (req, res) => {
 });
 
 // =============================================
+// =============================================
+// POST /chats/:chatId/send-media  (enviar media por URL o base64)
+// =============================================
+router.post('/chats/:chatId/send-media', async (req, res) => {
+  try {
+    const chatId = decodeURIComponent(req.params.chatId);
+    const { mediaUrl, mediaBase64, mimeType, fileName, caption } = req.body;
+    const sock = getSocket();
+    if (!sock) return res.status(503).json({ error: 'WhatsApp no conectado' });
+    const jid = chatId.includes('@') ? chatId : chatId + '@s.whatsapp.net';
+    
+    let mediaBuffer;
+    if (mediaBase64) {
+      mediaBuffer = Buffer.from(mediaBase64, 'base64');
+    } else if (mediaUrl) {
+      const resp = await fetch(mediaUrl);
+      if (!resp.ok) return res.status(400).json({ error: 'No se pudo descargar la media' });
+      const ab = await resp.arrayBuffer();
+      mediaBuffer = Buffer.from(ab);
+    } else {
+      return res.status(400).json({ error: 'Se requiere mediaUrl o mediaBase64' });
+    }
+    
+    const mime = mimeType || 'image/jpeg';
+    const isVideo = mime.startsWith('video/');
+    const isAudio = mime.startsWith('audio/');
+    const isGif   = mime === 'image/gif';
+    
+    let msgContent;
+    if (isVideo) {
+      msgContent = { video: mediaBuffer, mimetype: mime, caption: caption || '', fileName: fileName || 'video.mp4' };
+    } else if (isAudio) {
+      msgContent = { audio: mediaBuffer, mimetype: mime, ptt: false };
+    } else {
+      msgContent = { image: mediaBuffer, mimetype: mime, caption: caption || '', fileName: fileName || 'imagen.jpg' };
+    }
+    
+    await sock.sendMessage(jid, msgContent);
+    res.json({ ok: true, type: isVideo ? 'video' : isAudio ? 'audio' : 'image' });
+  } catch (err) {
+    console.error('[send-media]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // POST /send  (API directa)
 // =============================================
 router.post('/send', async (req, res) => {
