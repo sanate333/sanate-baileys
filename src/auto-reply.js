@@ -179,6 +179,11 @@ async function handleIncomingMessage(chatJid, messageText, pushName, messageId) 
 
   addToHistory(chatJid, 'user', messageText);
 
+  /* ── AUTO-ETIQUETA: detectar datos de envío → aplicar "Por Facturar" ── */
+  if (detectarDatosEnvio(messageText)) {
+    aplicarEtiquetaChat(chatJid, 'lbl_facturar').catch(() => {});
+  }
+
   if (replyTimers.has(chatJid)) {
     clearTimeout(replyTimers.get(chatJid));
   }
@@ -356,6 +361,50 @@ async function processReply(chatJid, pushName) {
     try { await sock.sendPresenceUpdate('paused', chatJid); } catch (e) {}
     if (sseManager) sseManager.broadcast({ type: 'bot_typing', data: { chatId: chatJid.split('@')[0], typing: false } });
     replyLocks.delete(chatJid);
+  }
+}
+
+// ===================== AUTO-ETIQUETAS =====================
+
+/** Detecta si el mensaje del cliente contiene datos de envío (nombre + dirección/ciudad) */
+function detectarDatosEnvio(text) {
+  if (!text || text.length < 15) return false;
+  const lower = text.toLowerCase();
+  let hits = 0;
+
+  /* Nombre del destinatario */
+  if (/\b(me llamo|soy\s+\w+|nombre[:\s]+|a nombre de|llamar[se]*\s+\w+)\b/i.test(lower)) hits++;
+  /* Dirección física */
+  if (/\b(direcci[oó]n|calle\s+\d|carrera\s+\d|cra\.?\s+\d|avenida|barrio\s+\w|diagonal|transversal|manzana|lote)\b/i.test(lower)) hits++;
+  /* Ciudad colombiana */
+  if (/\b(bogot[aá]|medell[ií]n|cali|barranquilla|bucaramanga|cartagena|c[uú]cuta|pereira|manizales|armenia|ibagu[eé]|ciudad[:\s]+|municipio[:\s]+)\b/i.test(lower)) hits++;
+  /* Teléfono de contacto */
+  if (/\b(cel[u]?lar[:\s]*|tel[eé]fono[:\s]*|whats[a]?pp[:\s]*|contacto[:\s]*|3\d{9})\b/i.test(lower)) hits++;
+  /* Palabras clave de pedido/envío */
+  if (/\b(env[ií]o|domicilio|entrega|pedido|direcci[oó]n de entrega|contra entrega|para envi[ao]r)\b/i.test(lower)) hits++;
+
+  return hits >= 2; /* Al menos 2 señales = datos de envío */
+}
+
+/** Aplica una etiqueta al chat en Supabase */
+async function aplicarEtiquetaChat(chatJid, labelId) {
+  try {
+    const { getSupabase } = require('./supabase');
+    const sb = getSupabase();
+    const jid = chatJid.includes('@') ? chatJid.split('@')[0] : chatJid;
+
+    /* Buscar el chat por JID */
+    const { data: chat } = await sb.from('oasis_wa_chats').select('jid,tags').or(`jid.eq.${jid},jid.eq.${jid}@s.whatsapp.net,jid.eq.${jid}@lid`).limit(1).single();
+    if (!chat) return;
+
+    const currentTags = Array.isArray(chat.tags) ? chat.tags : (JSON.parse(chat.tags || '[]'));
+    if (currentTags.includes(labelId)) return; /* Ya tiene la etiqueta */
+
+    const newTags = [...currentTags, labelId];
+    await sb.from('oasis_wa_chats').update({ tags: JSON.stringify(newTags) }).eq('jid', chat.jid);
+    console.log(`[AutoLabel] ⭐ Etiqueta "${labelId}" aplicada a ${jid}`);
+  } catch (e) {
+    console.error('[AutoLabel] Error:', e.message);
   }
 }
 
