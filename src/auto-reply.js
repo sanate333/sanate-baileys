@@ -179,9 +179,14 @@ async function handleIncomingMessage(chatJid, messageText, pushName, messageId) 
 
   addToHistory(chatJid, 'user', messageText);
 
-  /* ── AUTO-ETIQUETA: detectar datos de envío → aplicar "Por Facturar" ── */
+  /* ── AUTO-ETIQUETA: detectar datos de envío → "Por Facturar" ── */
   if (detectarDatosEnvio(messageText)) {
     aplicarEtiquetaChat(chatJid, 'lbl_facturar').catch(() => {});
+  }
+  /* ── AUTO-LEAD: detectar intención de compra ── */
+  const leadStage = detectarLead(messageText);
+  if (leadStage) {
+    actualizarLifecycleStage(chatJid, leadStage).catch(() => {});
   }
 
   if (replyTimers.has(chatJid)) {
@@ -384,6 +389,49 @@ function detectarDatosEnvio(text) {
   if (/\b(env[ií]o|domicilio|entrega|pedido|direcci[oó]n de entrega|contra entrega|para envi[ao]r)\b/i.test(lower)) hits++;
 
   return hits >= 2; /* Al menos 2 señales = datos de envío */
+}
+
+/** Detecta la intención del cliente para actualizar el lead stage */
+function detectarLead(text) {
+  if (!text || text.length < 5) return null;
+  const lower = text.toLowerCase();
+
+  /* Cliente confirmó compra / pagó / envió datos → cliente */
+  if (/\b(ya pagu[eé]|hice el pago|transf[ei]r[eí]|consign[eé]|ya compr[eé]|confirm[oa] el pedido|quiero comprarlo|me lo llevo|lo quiero)\b/i.test(lower)) return 'client';
+
+  /* Cliente envió datos de envío → también es cliente */
+  if (detectarDatosEnvio(text)) return 'client';
+
+  /* Cliente interesado pero no ha comprado */
+  if (/\b(cu[aá]nto cuesta|cu[aá]nto vale|precio|cu[aá]nto es|tiene[n]?\s+(el|la|los)|qu[eé]\s+productos|me interesa|info|m[aá]s informaci[oó]n|d[eé]jame pensar|lo consulto|luego te escribo|m[aá]s adelante|cuando tenga|si me funciona)\b/i.test(lower)) return 'interested';
+
+  /* Cliente descartado */
+  if (/\b(no gracias|no me interesa|est[aá] muy caro|no tengo plata|no puedo|ya compr[eé] en otro|no lo necesito|no quiero|bl[oó]queame)\b/i.test(lower)) return 'lost';
+
+  return null;
+}
+
+/** Actualiza el lifecycle_stage del chat en Supabase */
+async function actualizarLifecycleStage(chatJid, stage) {
+  try {
+    const { getSupabase } = require('./supabase');
+    const sb = getSupabase();
+    const jid = chatJid.includes('@') ? chatJid.split('@')[0] : chatJid;
+
+    const { data: chat } = await sb.from('oasis_wa_chats').select('jid,lifecycle_stage').or(`jid.eq.${jid},jid.eq.${jid}@s.whatsapp.net,jid.eq.${jid}@lid`).limit(1).single();
+    if (!chat) return;
+
+    /* Solo subir de categoría (new→interested→client), nunca bajar */
+    const rank = {new:0, interested:1, client:2, lost:1};
+    const currentRank = rank[chat.lifecycle_stage] || 0;
+    const newRank     = rank[stage] || 0;
+    if (newRank <= currentRank && chat.lifecycle_stage !== 'new') return; /* no bajar */
+
+    await sb.from('oasis_wa_chats').update({lifecycle_stage: stage}).eq('jid', chat.jid);
+    console.log(`[AutoLead] ${jid} → lifecycle_stage="${stage}"`);
+  } catch (e) {
+    console.error('[AutoLead] Error:', e.message);
+  }
 }
 
 /** Aplica una etiqueta al chat en Supabase */
