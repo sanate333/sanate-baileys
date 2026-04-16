@@ -312,6 +312,34 @@ async function processReply(chatJid, pushName) {
       systemPrompt += '\n\n[CONTEXTO DEL NEGOCIO]\n' + aiConfig.companyContext;
     }
 
+    // ── MEMORIA DEL CLIENTE (desde Supabase) ──
+    // Inyectar contexto previo: dirección, síntomas, productos de interés, pedidos
+    try {
+      const { data: clienteData } = await supabase.from('oasis_wa_chats')
+        .select('memoria_ia, historial_pedidos, ciudad, sintomas_piel, productos_interes, push_name')
+        .eq('jid', chatJid)
+        .single();
+      
+      if (clienteData) {
+        const memParts = [];
+        if (clienteData.ciudad) memParts.push(`📍 Ciudad: ${clienteData.ciudad}`);
+        if (clienteData.sintomas_piel?.length) memParts.push(`🧴 Problemas de piel: ${clienteData.sintomas_piel.join(', ')}`);
+        if (clienteData.productos_interes?.length) memParts.push(`🛒 Interesado en: ${clienteData.productos_interes.join(', ')}`);
+        if (clienteData.historial_pedidos?.length) {
+          const ultimo = clienteData.historial_pedidos.slice(-1)[0];
+          if (ultimo) memParts.push(`✅ Último pedido: $${ultimo.precio} el ${ultimo.fecha}`);
+        }
+        if (clienteData.memoria_ia) memParts.push(clienteData.memoria_ia);
+        
+        if (memParts.length > 0) {
+          systemPrompt += '\n\n[MEMORIA DE ESTE CLIENTE — USA ESTA INFO PARA PERSONALIZAR]\n' + memParts.join('\n');
+          systemPrompt += '\nUSA esta información para personalizar tu respuesta. Si ya conoces su ciudad/dirección, NO la vuelvas a pedir.';
+        }
+      }
+    } catch (memErr) {
+      // Silenciosamente ignorar si falla la consulta de memoria
+    }
+
     let reply = null;
     if (aiConfig.geminiKey) {
       reply = await callGemini(systemPrompt, history);
@@ -362,6 +390,60 @@ async function processReply(chatJid, pushName) {
 
     lastReplyTime.set(chatJid, Date.now());
     usageStats.totalReplies++;
+
+    // ── ACTUALIZAR MEMORIA del cliente después de cada respuesta ──
+    // Extraer contexto nuevo de la conversación reciente
+    try {
+      const historyRaw = await getHistory(chatJid);
+      const mensajesParaMem = historyRaw.slice(-20).map(m => ({
+        fromMe: m.role === 'assistant',
+        text: m.content
+      }));
+      
+      const textoCliente = mensajesParaMem
+        .filter(m => !m.fromMe).map(m => m.text).join(' ').toLowerCase();
+      
+      const updates = {};
+      
+      // Ciudad
+      const ciudadRe = /\b(bogot[aá]|medell[ií]n|cali|barranquilla|cartagena|armenia|pereira|manizales|bucaramanga|c[uú]cuta|ibagu[eé]|neiva|villavicencio|palmira|bello|envigado|soledad|floridablanca)\b/i;
+      const ciudadMatch = textoCliente.match(ciudadRe);
+      if (ciudadMatch) updates.ciudad = ciudadMatch[1];
+      
+      // Síntomas
+      const sintomasDetectados = ['acné','manchas','poros','resequedad','grasa','granitos','cicatriz','sensible','brillo']
+        .filter(s => textoCliente.includes(s));
+      if (sintomasDetectados.length) updates.sintomas_piel = sintomasDetectados;
+      
+      // Productos mencionados
+      const productosDetectados = ['cúrcuma','caléndula','avena','sebo','melena','polen']
+        .filter(p => textoCliente.includes(p));
+      if (productosDetectados.length) updates.productos_interes = productosDetectados;
+      
+      // Pedido confirmado en esta respuesta
+      if (reply.toLowerCase().includes('confirmado') && reply.toLowerCase().includes('pedido')) {
+        const precioM = reply.match(/\$([\d\.]+)/);
+        if (precioM) {
+          const { data: cd } = await supabase.from('oasis_wa_chats')
+            .select('historial_pedidos').eq('jid', chatJid).single();
+          const hist = cd?.historial_pedidos || [];
+          hist.push({ fecha: new Date().toISOString().slice(0,10), precio: precioM[1], estado: 'confirmado' });
+          updates.historial_pedidos = hist;
+        }
+      }
+      
+      // Resumen narrativo
+      const partesMem = [];
+      if (updates.ciudad) partesMem.push(`Ciudad: ${updates.ciudad}`);
+      if (updates.sintomas_piel?.length) partesMem.push(`Síntomas: ${updates.sintomas_piel.join(', ')}`);
+      if (updates.productos_interes?.length) partesMem.push(`Interés: ${updates.productos_interes.join(', ')}`);
+      if (partesMem.length > 0) updates.memoria_ia = '[CONTEXTO]\n' + partesMem.join('\n');
+      
+      if (Object.keys(updates).length > 0) {
+        updates.ultima_interaccion = new Date().toISOString();
+        await supabase.from('oasis_wa_chats').update(updates).eq('jid', chatJid);
+      }
+    } catch (memErr) { /* ignorar errores de memoria */ }
     // Daily counter
     const todayDate = new Date().toISOString().slice(0,10);
     if (usageStats.dailyDate !== todayDate) { usageStats.dailyCount = 0; usageStats.dailyDate = todayDate; }
