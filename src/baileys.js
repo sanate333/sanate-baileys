@@ -1,4 +1,4 @@
-const { default: makeWASocket, DisconnectReason, fetchLatestBaileysVersion, makeCacheableSignalKeyStore, isJidGroup, isJidBroadcast } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, DisconnectReason, fetchLatestBaileysVersion, makeCacheableSignalKeyStore, isJidGroup, isJidBroadcast, downloadMediaMessage } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const pino = require('pino');
 const NodeCache = require('node-cache');
@@ -30,6 +30,41 @@ async function initBaileys(supabase, sse) {
   sseManager = sse;
   setSseManager(sse); // Pasar SSE manager a auto-reply para eventos bot_typing
   await connectToWhatsApp();
+}
+
+
+// ── Audio transcription via Gemini ─────────────────────────────────────────
+async function transcribeAudio(msg) {
+  try {
+    const { getConfig } = require('./auto-reply');
+    const cfg = getConfig();
+    const key = cfg.geminiKey;
+    if (!key) return null;
+    const buffer = await downloadMediaMessage(msg, 'buffer', {});
+    if (!buffer || buffer.length === 0) return null;
+    const b64 = buffer.toString('base64');
+    const mime = msg.message?.audioMessage?.mimetype || 'audio/ogg; codecs=opus';
+    const resp = await fetch(
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=' + key,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [
+            { text: 'Transcribe EXACTAMENTE lo que dice este audio en español colombiano. Solo el texto transcrito, sin comentarios adicionales.' },
+            { inline_data: { mime_type: mime, data: b64 } }
+          ]}],
+          generationConfig: { temperature: 0.0, maxOutputTokens: 500 }
+        })
+      }
+    );
+    if (!resp.ok) { console.error('[transcribeAudio] Gemini error', resp.status); return null; }
+    const data = await resp.json();
+    return data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || null;
+  } catch (e) {
+    console.error('[transcribeAudio] Error:', e.message);
+    return null;
+  }
 }
 
 async function connectToWhatsApp() {
@@ -189,11 +224,23 @@ async function connectToWhatsApp() {
         data: { chatId: storageId, messageId: msg.key.id, pushName, senderName, text: messageText, messageType, fromMe, isGroup, timestamp: Date.now() }
       });
 
-      // Auto-reply: only for incoming non-group text messages
-      if (!fromMe && !isGroup && messageText && type === 'notify') {
-        handleIncomingMessage(chatId, messageText, pushName || senderName, msg.key.id).catch(err => {
-          console.error('Auto-reply error:', err.message);
-        });
+      // Auto-reply: text messages + audio (auto-transcribed with Gemini)
+      if (!fromMe && !isGroup && type === 'notify') {
+        let effectiveText = messageText;
+        if (!effectiveText && messageType === 'audio') {
+          try {
+            const transcript = await transcribeAudio(msg);
+            if (transcript) {
+              effectiveText = transcript;
+              console.log('[Audio→Texto] ' + chatId.split('@')[0] + ': ' + transcript.substring(0, 80));
+            }
+          } catch (e) { console.error('[transcribeAudio] error:', e.message); }
+        }
+        if (effectiveText) {
+          handleIncomingMessage(chatId, effectiveText, pushName || senderName, msg.key.id).catch(err => {
+            console.error('Auto-reply error:', err.message);
+          });
+        }
       }
     }
   });
