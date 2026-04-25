@@ -67,6 +67,44 @@ async function transcribeAudio(msg) {
   }
 }
 
+// ── Image analysis via Gemini Vision ───────────────────────────────────────
+async function analyzeImage(msg) {
+  try {
+    const { getConfig } = require('./auto-reply');
+    const cfg = getConfig();
+    const key = cfg.geminiKey;
+    if (!key) return null;
+    const buffer = await downloadMediaMessage(msg, 'buffer', {});
+    if (!buffer || buffer.length === 0) return null;
+    const b64 = buffer.toString('base64');
+    const mime = msg.message?.imageMessage?.mimetype || 'image/jpeg';
+    const caption = msg.message?.imageMessage?.caption || '';
+    const resp = await fetch(
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=' + key,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [
+            { text: 'Analiza esta imagen en español colombiano. Si es un comprobante de pago o transferencia bancaria, responde: "COMPROBANTE DE PAGO: [monto, banco, fecha y referencia si se ven]". Si muestra piel, rostro o condición dermatológica/estética, describe clínicamente: condición, ubicación, características (manchas, rojeces, textura, melasma, acné, etc). Para cualquier otra imagen, describe brevemente qué muestra.' + (caption ? ' El usuario también escribió: ' + caption : '') + ' Sé conciso y directo.' },
+            { inline_data: { mime_type: mime, data: b64 } }
+          ]}],
+          generationConfig: { temperature: 0.1, maxOutputTokens: 400 }
+        })
+      }
+    );
+    if (!resp.ok) { console.error('[analyzeImage] Gemini error', resp.status); return caption || null; }
+    const data = await resp.json();
+    const analysis = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || null;
+    if (caption && analysis) return caption + '\n[Imagen: ' + analysis + ']';
+    return analysis || caption || null;
+  } catch (e) {
+    console.error('[analyzeImage] Error:', e.message);
+    return msg.message?.imageMessage?.caption || null;
+  }
+}
+
+
 async function connectToWhatsApp() {
   const { state, saveCreds } = await useSupabaseAuthState(supabaseClient);
   const { version } = await fetchLatestBaileysVersion();
@@ -224,7 +262,7 @@ async function connectToWhatsApp() {
         data: { chatId: storageId, messageId: msg.key.id, pushName, senderName, text: messageText, messageType, fromMe, isGroup, timestamp: Date.now() }
       });
 
-      // Auto-reply: text messages + audio (auto-transcribed with Gemini)
+      // Auto-reply: texto + audio (transcrito) + imagen (analizada con Gemini)
       if (!fromMe && !isGroup && type === 'notify') {
         let effectiveText = messageText;
         if (!effectiveText && messageType === 'audio') {
@@ -235,6 +273,15 @@ async function connectToWhatsApp() {
               console.log('[Audio→Texto] ' + chatId.split('@')[0] + ': ' + transcript.substring(0, 80));
             }
           } catch (e) { console.error('[transcribeAudio] error:', e.message); }
+        }
+        if (!effectiveText && messageType === 'image') {
+          try {
+            const analysis = await analyzeImage(msg);
+            if (analysis) {
+              effectiveText = analysis;
+              console.log('[Imagen→Texto] ' + chatId.split('@')[0] + ': ' + analysis.substring(0, 80));
+            }
+          } catch (e) { console.error('[analyzeImage] error:', e.message); }
         }
         if (effectiveText) {
           handleIncomingMessage(chatId, effectiveText, pushName || senderName, msg.key.id).catch(err => {
