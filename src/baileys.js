@@ -33,7 +33,7 @@ async function initBaileys(supabase, sse) {
 }
 
 
-// ── Audio transcription via Gemini ─────────────────────────────────────────
+// ââ Audio transcription via Gemini â 3 capas (literal + contextual + intenciÃ³n) ââââââ
 async function transcribeAudio(msg) {
   try {
     const { getConfig } = require('./auto-reply');
@@ -44,6 +44,20 @@ async function transcribeAudio(msg) {
     if (!buffer || buffer.length === 0) return null;
     const b64 = buffer.toString('base64');
     const mime = msg.message?.audioMessage?.mimetype || 'audio/ogg; codecs=opus';
+
+    const prompt = `Eres experto en transcripciÃ³n de audios de WhatsApp colombianos.
+El audio puede ser de una persona mayor (60-80 aÃ±os), con voz baja, acento regional, ruido de fondo o pronunciaciÃ³n poco clara.
+
+Haz 3 interpretaciones del audio:
+LITERAL: (escribe textualmente lo que escuchas, aunque sea parcial o con ruido)
+CONTEXTUAL: (interpreta lo que probablemente quiso decir; es cliente de una tienda de cosmÃ©ticos naturales colombiana â jabones artesanales, cremas, productos para manchas, acnÃ©, piel grasa/seca, precios, envÃ­os, pedidos)
+INTENCION: (Â¡quÃ© estÃ¡ preguntando o pidiendo concretamente? escrÃ­belo en una frase clara y directa)
+
+Luego elige la interpretaciÃ³n mÃ¡s Ãºtil y completa para que la IA pueda responder con precisiÃ³n:
+FINAL: (puede combinar las 3 capas â debe ser claro y completo aunque el audio fuera difÃ­cil de entender)
+
+Responde SOLO con este formato. Sin comentarios adicionales.`;
+
     const resp = await fetch(
       'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=' + key,
       {
@@ -51,21 +65,41 @@ async function transcribeAudio(msg) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           contents: [{ parts: [
-            { text: 'Transcribe EXACTAMENTE lo que dice este audio en español colombiano. Solo el texto transcrito, sin comentarios adicionales.' },
+            { text: prompt },
             { inline_data: { mime_type: mime, data: b64 } }
           ]}],
-          generationConfig: { temperature: 0.0, maxOutputTokens: 500 }
+          generationConfig: { temperature: 0.1, maxOutputTokens: 700 }
         })
       }
     );
     if (!resp.ok) { console.error('[transcribeAudio] Gemini error', resp.status); return null; }
     const data = await resp.json();
-    return data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || null;
+    const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || null;
+    if (!raw) return null;
+
+    const getLayer = (label, next) => {
+      const re = new RegExp(label + ':\\\\s*([\\\\s\\\\S]+?)(?=' + next + ':|$)');
+      const m = raw.match(re);
+      return m ? m[1].trim() : '';
+    };
+    const l1 = getLayer('LITERAL', 'CONTEXTUAL');
+    const l2 = getLayer('CONTEXTUAL', 'INTENCION');
+    const l3 = getLayer('INTENCION', 'FINAL');
+    const finalMatch = raw.match(/FINAL:\s*([\s\S]+)$/);
+    const finalText = finalMatch ? finalMatch[1].trim() : raw;
+
+    if (l1) console.log('[Audio L0-literal]    ' + l1.substring(0, 70));
+    if (l2) console.log('[Audio L2-contextual] ' + l2.substring(0, 70));
+    if (l3) console.log('[Audio L3-intencion]  ' + l3.substring(0, 70));
+    console.log('[Audio FINAL] ' + finalText.substring(0, 100));
+
+    return finalText || l3 || l2 || l1 || null;
   } catch (e) {
     console.error('[transcribeAudio] Error:', e.message);
     return null;
   }
 }
+
 
 // ── Image analysis via Gemini Vision ───────────────────────────────────────
 async function analyzeImage(msg) {
