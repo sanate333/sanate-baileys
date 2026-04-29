@@ -298,6 +298,8 @@ async function connectToWhatsApp() {
 
       // Auto-reply: texto + audio (transcrito) + imagen (analizada con Gemini)
       if (!fromMe && !isGroup && type === 'notify') {
+      // Suscribirse a presencia para recibir eventos de escritura
+      try { sock.presenceSubscribe(chatId).catch(() => {}); } catch(e) {}
         let effectiveText = messageText;
         if (!effectiveText && messageType === 'audio') {
           try {
@@ -318,9 +320,14 @@ async function connectToWhatsApp() {
           } catch (e) { console.error('[analyzeImage] error:', e.message); }
         }
         if (effectiveText) {
-          handleIncomingMessage(chatId, effectiveText, pushName || senderName, msg.key.id).catch(err => {
-            console.error('Auto-reply error:', err.message);
-          });
+          // Mostrar "escribiendo..." al contacto mientras la IA genera respuesta
+          try { sock.sendPresenceUpdate('composing', chatId).catch(() => {}); } catch(e) {}
+          handleIncomingMessage(chatId, effectiveText, pushName || senderName, msg.key.id)
+            .then(() => { try { sock.sendPresenceUpdate('paused', chatId).catch(() => {}); } catch(e) {} })
+            .catch(err => {
+              console.error('Auto-reply error:', err.message);
+              try { sock.sendPresenceUpdate('paused', chatId).catch(() => {}); } catch(e) {}
+            });
         }
       }
     }
