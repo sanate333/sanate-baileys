@@ -78,7 +78,7 @@ Responde SOLO con este formato. Sin comentarios adicionales.`;
     if (!raw) return null;
 
     const getLayer = (label, next) => {
-      const re = new RegExp(label + ':\\\\s*([\\\\s\\\\S]+?)(?=' + next + ':|$)');
+      const re = new RegExp(label + ':\\s*([\\s\\S]+?)(?=' + next + ':|$)');
       const m = raw.match(re);
       return m ? m[1].trim() : '';
     };
