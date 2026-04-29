@@ -291,3 +291,83 @@
   setTimeout(() => { conectarSSE(); reescanearTicks(); }, 1500);
 
 })();
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   ANTI-FLICKER PATCH v3 — set-based append, eliminates titileo
+   Overrides the index-based prefix check with Set membership check.
+   Prevents full container.innerHTML rebuild when loadMessages fires
+   twice (once per JID result, once for merged final).
+   ═══════════════════════════════════════════════════════════════════ */
+(function patchAntiFlicker() {
+  function tryPatch() {
+    if (!window.renderMessages || !window.escHtml) {
+      return setTimeout(tryPatch, 200);
+    }
+    var _orig = window.renderMessages;
+    var _patched = false;
+    if (_orig._antiFlickerV3) return; // already patched
+
+    window.renderMessages = function renderMessagesV3(msgs) {
+      var container = document.getElementById('messages');
+      if (!container || !msgs || msgs.length === 0) return _orig(msgs);
+
+      // Get existing DOM rows
+      var existingRows = Array.from(container.querySelectorAll('.msg-row[data-msgid]'));
+      if (existingRows.length === 0) return _orig(msgs); // first load — always full render
+
+      // Build Set of existing IDs in DOM
+      var existingIdSet = {};
+      existingRows.forEach(function(r) { existingIdSet[r.getAttribute('data-msgid')] = 1; });
+
+      // Build Set of new message IDs
+      var newIdSet = {};
+      msgs.forEach(function(m) {
+        var id = String(m.message_id || m.id || '');
+        if (id) newIdSet[id] = 1;
+      });
+
+      // Check if any existing DOM row was deleted from new data
+      var hasDeletes = existingRows.some(function(r) {
+        var id = r.getAttribute('data-msgid');
+        return id && !newIdSet[id];
+      });
+      if (hasDeletes) return _orig(msgs); // deletion → full rebuild
+
+      // Count new messages not yet in DOM
+      var newCount = msgs.filter(function(m) {
+        return !existingIdSet[String(m.message_id || m.id || '')];
+      }).length;
+
+      if (newCount === 0) {
+        // Same messages — only tick/status updates needed, no DOM flicker
+        // Patch _lastMsgsSig directly to avoid spurious full rebuild
+        var sig = window._sigMsgs ? window._sigMsgs(msgs) : '';
+        if (sig && window._lastMsgsSig === sig) return; // truly no change
+        // Let original handle tick updates (no full rebuild since sig check exits early)
+        return _orig(msgs);
+      }
+
+      // New messages present — force them to end of _nIds so prefix check passes
+      // Sort msgs: existing first (in DOM order), then new ones
+      var domOrder = {};
+      existingRows.forEach(function(r, i) { domOrder[r.getAttribute('data-msgid')] = i; });
+
+      var sortedMsgs = msgs.slice().sort(function(a, b) {
+        var ai = domOrder[String(a.message_id || a.id || '')];
+        var bi = domOrder[String(b.message_id || b.id || '')];
+        if (ai !== undefined && bi !== undefined) return ai - bi;
+        if (ai !== undefined) return -1;
+        if (bi !== undefined) return 1;
+        // Both new — sort by timestamp
+        var at = a.created_at || a.timestamp || 0;
+        var bt = b.created_at || b.timestamp || 0;
+        return at > bt ? 1 : at < bt ? -1 : 0;
+      });
+
+      return _orig(sortedMsgs);
+    };
+    window.renderMessages._antiFlickerV3 = true;
+  }
+  tryPatch();
+})();
