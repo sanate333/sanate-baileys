@@ -3,7 +3,7 @@ const router = express.Router();
 const QRCode = require('qrcode');
 const { getConnectionState, getQR, getProfilePhoto, getContactName, sendMessage, disconnect, getSocket, contactCache } = require('./baileys');
 const { getChats, getMessages, saveMessage, upsertChat } = require('./supabase');
-const { getConfig, setConfig, getUsageStats } = require('./auto-reply');
+const { getConfig, setConfig, getUsageStats, handleIncomingMessage } = require('./auto-reply');
 
 // Baileys internals para envio directo de mensajes interactivos (relayMessage)
 let _baileys = null;
@@ -1666,6 +1666,21 @@ router.post('/send-catalogo', async (req, res) => {
     res.json({ ok: true, to: cleanTo, url: catalogUrl });
   } catch(e) {
     res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+
+// POST /trigger-reply — Bot forzado a responder al último mensaje del cliente
+router.post('/trigger-reply', async (req, res) => {
+  try {
+    const { jid, messageText, pushName } = req.body;
+    if (!jid || !messageText) return res.status(400).json({ error: 'jid y messageText requeridos' });
+    const msgId = 'trigger-' + Date.now();
+    handleIncomingMessage(jid, messageText, pushName || 'Cliente', msgId)
+      .catch(e => console.error('[trigger-reply] error:', e.message));
+    res.json({ ok: true, jid, msgId });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
   }
 });
 
