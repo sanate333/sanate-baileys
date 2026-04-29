@@ -327,3 +327,94 @@ obs.observe(document.body,{childList:true,subtree:true});
 setTimeout(tryInject,800); setTimeout(tryInject,2000);
 console.log('[WABA+Sánate v6.5] cargado — FormData+JSON, sin encuestas');
 })();
+
+
+/* ── triggerBotResponse PATCH v2 ── calls /trigger-reply after enabling contactMap ── */
+(function patchTriggerBot() {
+  function tryPatch() {
+    if (typeof window.triggerBotResponse !== 'function' || typeof window.BU === 'undefined') {
+      return setTimeout(tryPatch, 300);
+    }
+    if (window.triggerBotResponse._v2) return;
+
+    window.triggerBotResponse = function triggerBotResponseV2() {
+      var btn = document.getElementById('bot-trigger-btn');
+      if (btn && btn.dataset.busy === '1') return;
+      if (btn) btn.dataset.busy = '1';
+
+      /* Get last incoming message text */
+      var inMsgs = Array.from(document.querySelectorAll('.msg-row.in .bubble'));
+      if (!inMsgs.length) {
+        window.showToast && showToast('No hay mensajes del cliente');
+        if (btn) btn.dataset.busy = '';
+        return;
+      }
+      var lastMsgText = (inMsgs[inMsgs.length - 1].innerText || '').trim();
+      if (!lastMsgText) {
+        window.showToast && showToast('Mensaje vacío — sin texto legible');
+        if (btn) btn.dataset.busy = '';
+        return;
+      }
+
+      if (btn) { btn.classList.add('loading'); btn.style.opacity = '0.7'; }
+      window.showToast && showToast('\u{1F916} Activando IA para responder...');
+
+      var jid = window.chatJid || '';
+      var rn  = window.rawNum  || '';
+
+      /* 1. Enable contactMap for this JID */
+      fetch(BU + '/ai-config')
+        .then(function(r) { return r.json(); })
+        .then(function(cfg) {
+          var m = Object.assign({}, cfg.contactMap || {});
+          var n9 = rn.slice(-9);
+          m[jid] = true;
+          m[rn]  = true;
+          return fetch(BU + '/ai-config', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({contactMap: m})
+          }).then(function() { return {map: m, n9: n9}; });
+        })
+        /* 2. Force bot to process last message */
+        .then(function(ctx) {
+          return fetch(BU + '/trigger-reply', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({jid: jid, messageText: lastMsgText, pushName: rn})
+          }).then(function(r) { return r.json(); })
+            .then(function() { return ctx; });
+        })
+        /* 3. Wait for Gemini to reply */
+        .then(function(ctx) {
+          window.showToast && showToast('\u{1F916} Bot procesando — espera...');
+          return new Promise(function(res) { setTimeout(res, 4000, ctx); });
+        })
+        /* 4. Disable contactMap again */
+        .then(function(ctx) {
+          var rm = Object.assign({}, ctx.map);
+          rm[jid] = false;
+          rm[rn]  = false;
+          Object.keys(rm).forEach(function(k) {
+            if (k.replace(/\D/g,'').slice(-9) === ctx.n9) rm[k] = false;
+          });
+          return fetch(BU + '/ai-config', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({contactMap: rm})
+          });
+        })
+        .then(function() {
+          window.showToast && showToast('\u{1F916} IA respondio - pausada de nuevo');
+          if (btn) { btn.classList.remove('loading'); btn.style.opacity = ''; btn.dataset.busy = ''; }
+          setTimeout(function() { window.loadMessages && loadMessages(); }, 300);
+        })
+        .catch(function(err) {
+          window.showToast && showToast('\u274C Error: ' + (err.message || 'sin conexion'));
+          if (btn) { btn.classList.remove('loading'); btn.style.opacity = ''; btn.dataset.busy = ''; }
+        });
+    };
+    window.triggerBotResponse._v2 = true;
+  }
+  tryPatch();
+})();
