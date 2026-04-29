@@ -160,7 +160,7 @@ async function handleIncomingMessage(chatJid, messageText, pushName, messageId) 
 
   if (aiConfig.testWhitelist && aiConfig.testWhitelist.length > 0) {
     const phoneNumber = chatJid.split('@')[0];
-    if (!aiConfig.testWhitelist.includes(phoneNumber)) return;
+    if (!aiConfig.testWhitelist.includes(phoneNumber) && !chatJid.endsWith('@lid')) return;
   }
   if (!messageText || messageText.trim().length === 0) return;
   if (!sock) return;
