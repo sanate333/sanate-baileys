@@ -176,7 +176,7 @@ async function handleIncomingMessage(chatJid, messageText, pushName, messageId) 
       // Buscar por numero (sin @) tambien
       const jidNum = chatJid.replace(/[^0-9]/g, '');
       const matchByNum = Object.keys(contactMap).find(k => k.replace(/[^0-9]/g,'') === jidNum && contactMap[k] === true);
-      if (!matchByNum) return;
+      if (!matchByNum && !chatJid.endsWith('@lid')) return;
     }
   }
   if (contactMap[chatJid] === false) return;
