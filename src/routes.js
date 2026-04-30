@@ -4,6 +4,7 @@ const QRCode = require('qrcode');
 const { getConnectionState, getQR, getProfilePhoto, getContactName, sendMessage, disconnect, getSocket, contactCache } = require('./baileys');
 const { getChats, getMessages, saveMessage, upsertChat } = require('./supabase');
 const { getConfig, setConfig, getUsageStats, handleIncomingMessage } = require('./auto-reply');
+const { getAudioSettings, saveAudioSettings, sendAudioTest } = require('./audio-tts');
 
 // Baileys internals para envio directo de mensajes interactivos (relayMessage)
 let _baileys = null;
@@ -375,11 +376,13 @@ router.get('/status', (req, res) => {
     timestamp: new Date().toISOString(),
     hotfixes: [
       RENDER_URL + '/hotfixes/waba-connect-ui.js',
-      RENDER_URL + '/hotfixes/visual-chat-v2.js'
+      RENDER_URL + '/hotfixes/visual-chat-v2.js',
+      RENDER_URL + '/hotfixes/meta-panel-hotfix.js'
     ],
     extraScripts: [
       RENDER_URL + '/hotfixes/waba-connect-ui.js',
-      RENDER_URL + '/hotfixes/visual-chat-v2.js'
+      RENDER_URL + '/hotfixes/visual-chat-v2.js',
+      RENDER_URL + '/hotfixes/meta-panel-hotfix.js'
     ]
   });
 });
@@ -1684,4 +1687,65 @@ router.post('/trigger-reply', async (req, res) => {
   }
 });
 
-module.exports = router;
+// POST /subscribe-presence — Suscribirse a presencia de un contacto para typing indicators
+router.post('/subscribe-presence', async (req, res) => {
+  try {
+    const { jid } = req.body || {};
+    if (!jid) return res.status(400).json({ error: 'jid requerido' });
+    const sock = getSocket();
+    if (!sock) return res.status(503).json({ error: 'WhatsApp no conectado' });
+    await sock.presenceSubscribe(jid);
+    // Also subscribe to @lid variant if applicable
+    const num = jid.replace(/[^0-9]/g, '');
+    if (jid.endsWith('@s.whatsapp.net')) {
+      try { await sock.presenceSubscribe(num + '@lid'); } catch(e) {}
+    }
+    res.json({ success: true, subscribed: jid });
+  } catch (err) {
+    console.error('[subscribe-presence]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// =============================================
+// AUDIO TTS SETTINGS
+// =============================================
+
+// GET /audio-settings — Devuelve configuración de audio + estadísticas de uso
+router.get('/audio-settings', (req, res) => {
+  try {
+    res.json(getAudioSettings());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /audio-settings — Guarda configuración de audio en Supabase
+router.post('/audio-settings', async (req, res) => {
+  try {
+    const { voice, maxAudiosPerConvo, respondWithAudio } = req.body;
+    const settings = {};
+    if (voice !== undefined) settings.voice = voice;
+    if (maxAudiosPerConvo !== undefined) settings.maxAudiosPerConvo = Math.max(1, parseInt(maxAudiosPerConvo) || 1);
+    if (respondWithAudio !== undefined) settings.respondWithAudio = !!respondWithAudio;
+
+    await saveAudioSettings(settings);
+    res.json({ ok: true, settings: getAudioSettings() });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// POST /audio-test — Envía un audio de prueba al número configurado via WhatsApp
+router.post('/audio-test', async (req, res) => {
+  try {
+    const { text, to } = req.body;
+    // Send to configured test number or provided target
+    const targetJid = to
+      ? to.replace(/[^0-9]/g, '') + '@s.whatsapp.net'
+      : (process.env.TEST_PHONE || '573227461878') + '@s.whatsapp.net';
+
+    const result = await sendAudioTest(targetJid, text);
+    res.json({ ok: true, ...result, target: targetJid });
+  } catch (err) {
+    console.error('[audio-test] Error:', err
