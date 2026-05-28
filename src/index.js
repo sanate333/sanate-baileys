@@ -10,14 +10,19 @@ const path = require('path');
 const { createServer } = require('http');
 
 const { initBaileys, getSocket, getQR, getConnectionState } = require('./baileys');
+const { saveAuthToSupabase } = require('./auth-store');
 const { initSupabase } = require('./supabase');
 const { SSEManager } = require('./sse');
 const { initAutoReply } = require('./auto-reply');
+const { initAudioTTS, updateAudioSocket } = require('./audio-tts');
 const apiRoutes = require('./routes');
+const { startTrackingCron } = require('../tracking-cron');
+const storeContext = require('./store-context');
 
 const app = express();
 const server = createServer(app);
 const PORT = process.env.PORT || 5055;
+let trackingCron = null;
 
 // === MIDDLEWARE ===
 app.use(cors({
@@ -25,6 +30,8 @@ app.use(cors({
   credentials: true
 }));
 app.use(express.json({ limit: '10mb' }));
+// Multi-tenant: attach store_id to every request
+app.use(storeContext.storeMiddleware);
 
 // === HOTFIXES: sirve scripts de UI desde /hotfixes ===
 app.use('/hotfixes', (req, res, next) => {
@@ -50,9 +57,20 @@ app.get('/', (req, res) => {
 // === API ROUTES ===
 app.use('/api/whatsapp', apiRoutes);
 
+// === TRACKING CRON — manual trigger endpoint ===
+const TRACKING_SECRET = process.env.SECRET || process.env.BAILEYS_SECRET || 'sanate_secret_2025';
+app.post('/tracking/run', (req, res) => {
+  const s = req.headers['x-secret'] || req.query.secret;
+  if (s !== TRACKING_SECRET) return res.status(401).json({ error: 'No autorizado' });
+  if (!trackingCron) return res.status(500).json({ error: 'Tracking cron not initialized' });
+  trackingCron.runNow()
+    .then(() => res.json({ ok: true }))
+    .catch(e => res.status(500).json({ error: e.message }));
+});
+
 // === SELF-PING KEEP-ALIVE (evita que Render apague el servicio) ===
 const RENDER_URL = process.env.RENDER_EXTERNAL_URL || 'https://sanate-wa-bot.onrender.com';
-const KEEP_ALIVE_INTERVAL = 10 * 60 * 1000; // 10 minutos
+const KEEP_ALIVE_INTERVAL = 4 * 60 * 1000; // 4 minutos (Render free tier duerme a los 15 min)
 let keepAliveTimer = null;
 
 function startKeepAlive() {
@@ -63,10 +81,10 @@ function startKeepAlive() {
       const data = await res.json();
       console.log('[KeepAlive] Ping OK - status:', data.status, 'connection:', data.connection, 'uptime:', data.uptime + 's');
     } catch (err) {
-      console.log('[KeepAlive] Ping fall\u00f3:', err.message);
+      console.log('[KeepAlive] Ping fallo:', err.message);
     }
   }, KEEP_ALIVE_INTERVAL);
-  console.log('[KeepAlive] Self-ping activo cada 10 min -> ' + RENDER_URL);
+  console.log('[KeepAlive] Self-ping activo cada 4 min -> ' + RENDER_URL);
 }
 
 // === CARGAR CONFIG DESDE SUPABASE ===
@@ -97,12 +115,16 @@ async function loadConfigFromSupabase(supabase) {
 
 // === ARRANCAR TODO ===
 async function start() {
-  console.log('Sanate WhatsApp Bot Server');
+  console.log('Sanate WhatsApp Bot Server v3.2');
   console.log('================================');
 
   console.log('Conectando Supabase...');
   const supabase = initSupabase();
   app.set('supabase', supabase);
+
+  // Multi-tenant: inicializar store context y cargar tiendas
+  storeContext.init(supabase);
+  await storeContext.loadStores();
 
   console.log('Cargando configuracion desde Supabase...');
   await loadConfigFromSupabase(supabase);
@@ -111,16 +133,26 @@ async function start() {
   server.listen(PORT, () => {
     console.log('Servidor corriendo en puerto ' + PORT);
     console.log('SSE disponible en /api/whatsapp/events');
-    // Iniciar self-ping una vez el servidor est\u00e9 escuchando
+    // Iniciar self-ping una vez el servidor este escuchando
     startKeepAlive();
   });
 
   console.log('Iniciando auto-reply...');
   await initAutoReply(supabase, null); // socket will be set on connection
 
+  console.log('Iniciando Audio TTS...');
+  initAudioTTS(supabase, null); // socket will be set on connection
+
   console.log('Iniciando conexion WhatsApp...');
   await initBaileys(supabase, sse);
   console.log('Baileys iniciado');
+
+  // Start tracking cron — adapter bridges getSocket/getConnectionState to getDevice interface
+  console.log('Iniciando tracking cron...');
+  trackingCron = startTrackingCron(function() {
+    return { sock: getSocket(), status: getConnectionState() === 'open' ? 'connected' : 'disconnected' };
+  });
+  console.log('Tracking cron activo');
 }
 
 start().catch(err => {
@@ -128,15 +160,36 @@ start().catch(err => {
   process.exit(1);
 });
 
-// === MANEJO DE SEÃALES (evita crash cuando Render reinicia el contenedor) ===
+// === MANEJO DE SENALES (evita crash cuando Render reinicia el contenedor) ===
 async function gracefulShutdown(signal) {
-  console.log('[Shutdown] SeÃ±al ' + signal + ' recibida - cerrando limpiamente...');
+  console.log('[Shutdown] Senal ' + signal + ' recibida - guardando sesion...');
   if (keepAliveTimer) clearInterval(keepAliveTimer);
+
+  // 1. Guardar auth en Supabase ANTES de cerrar - critico para reconexion sin QR
+  const supabase = app.get('supabase');
+  if (supabase) {
+    try {
+      await saveAuthToSupabase(supabase);
+      console.log('[Shutdown] Auth guardada en Supabase OK');
+    } catch (err) {
+      console.error('[Shutdown] Error guardando auth:', err.message);
+    }
+  }
+
+  // 2. Cerrar socket de Baileys limpiamente (evita connectionReplaced en nueva instancia)
+  const sock = getSocket();
+  if (sock) {
+    try { sock.ev.removeAllListeners(); } catch(e) {}
+    try { sock.end(undefined); } catch(e) {}
+    console.log('[Shutdown] Socket de Baileys cerrado');
+  }
+
+  // 3. Cerrar servidor HTTP
   server.close(() => {
     console.log('[Shutdown] Servidor HTTP cerrado. Saliendo.');
     process.exit(0);
   });
-  // Forzar salida si el cierre tarda mÃ¡s de 8 segundos
+  // Forzar salida si el cierre tarda mas de 8 segundos
   setTimeout(() => {
     console.log('[Shutdown] Timeout - forzando salida.');
     process.exit(0);
@@ -146,7 +199,7 @@ async function gracefulShutdown(signal) {
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
 
-// === PROTECCIÃN CONTRA CRASHES SILENCIOSOS ===
+// === PROTECCION CONTRA CRASHES SILENCIOSOS ===
 process.on('uncaughtException', (err) => {
   console.error('[UncaughtException] Error no capturado (bot sigue corriendo):', err.message);
 });

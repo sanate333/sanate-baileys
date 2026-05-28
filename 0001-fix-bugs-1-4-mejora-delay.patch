@@ -1,0 +1,131 @@
+From a2188bd3bf27d2d6537d759340f8c18799907463 Mon Sep 17 00:00:00 2001
+From: Sebastian <sanate333@gmail.com>
+Date: Wed, 29 Apr 2026 14:52:17 +0000
+Subject: [PATCH] fix: bugs 1-4 + mejora delay
+
+Bug 2: eliminar saveMessage duplicado en processReply (causaba N+1 burbujas)
+Bug 3: clarificar regla de formato - prohibir listas, permitir *negrillas*
+Bug 4: separar pregunta final como mensaje aparte en smartSplit
+Bug 1: subir audio/imagen/video a Supabase Storage y guardar mediaUrl
+Mejora 1: delay progresivo entre partes basado en velocidad de escritura real
+---
+ src/auto-reply.js | 33 ++++++++++++++++++++-------------
+ src/baileys.js    | 32 ++++++++++++++++++++++++++++++++
+ 2 files changed, 52 insertions(+), 13 deletions(-)
+
+diff --git a/src/auto-reply.js b/src/auto-reply.js
+index db8b14a..ab84fca 100644
+--- a/src/auto-reply.js
++++ b/src/auto-reply.js
+@@ -255,7 +255,9 @@ async function processReply(chatJid, pushName) {
+     systemPrompt += '\n5. VARIA tus expresiones de apertura. PROHIBIDO empezar siempre con "Genial!", "Claro que si!", "Que buena pregunta!". Usa variaciones naturales.';
+     systemPrompt += '\n6. NO hagas pregunta de cierre de venta en CADA mensaje. Solo cuando el cliente muestre interes claro.';
+     systemPrompt += '\n7. NUNCA repitas una pregunta que ya hiciste antes. Lee el historial.';
+-    systemPrompt += '\n8. Nunca uses listas con vinetas (*) a menos que estes listando productos/precios.';
++    systemPrompt += '\n8. NUNCA hagas listas con guiones (-) ni asteriscos (*) como vinetas de lista.';
++    systemPrompt += '\n   USA *negrillas* (asterisco simple) para resaltar palabras clave: precios, nombres de productos, beneficios.';
++    systemPrompt += '\n   Ejemplos: "El *Jabon de Avena y Arroz* cuesta *$18.000*" o "Ideal para *manchas* y *acne*".';
+     systemPrompt += '\n9. Si no tienes info del producto, di que consultas con el equipo y respondes pronto.';
+     systemPrompt += '\n10. Adapta la LONGITUD segun la pregunta: pregunta simple = respuesta corta 1-2 oraciones. Pregunta sobre beneficios = respuesta detallada.';
+ 
+@@ -376,7 +378,9 @@ async function processReply(chatJid, pushName) {
+           try { await sock.sendPresenceUpdate('composing', chatJid); } catch(e) {}
+           await sock.sendMessage(chatJid, { text: partText });
+           if (i < parts.length - 1) {
+-            const typingDelay = Math.min(3000, 800 + partText.length * 15);
++            // Delay progresivo basado en velocidad de escritura real (~180 wpm)
++            const words = partText.split(/\s+/).length;
++            const typingDelay = Math.max(1200, Math.min(4000, (words / 180) * 60000));
+             await new Promise(r => setTimeout(r, typingDelay));
+           }
+         }
+@@ -452,17 +456,9 @@ async function processReply(chatJid, pushName) {
+ 
+     addToHistory(chatJid, 'model', reply);
+ 
+-    // Guardar siempre en Supabase (modo partes y modo completo)
+-    const { saveMessage, upsertChat } = require('./supabase');
+-    const storageJid = chatJid.includes('@') ? chatJid.split('@')[0] : chatJid;
+-    await saveMessage(storageJid, 'Sanate Bot', {
+-      messageId: 'bot_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6),
+-      text: reply,
+-      type: 'text',
+-      fromMe: true,
+-      timestamp: Math.floor(Date.now() / 1000),
+-    });
+-    await upsertChat(storageJid, null, reply, Math.floor(Date.now() / 1000));
++    // NO guardar en Supabase aquí — Baileys ya guarda cada mensaje saliente
++    // automáticamente via messages.upsert con fromMe=true (baileys.js línea ~279).
++    // El saveMessage duplicado con ID inventado (bot_TIMESTAMP) causaba N+1 burbujas.
+ 
+   } catch (err) {
+     console.error('Error en processReply:', err.message);
+@@ -742,6 +738,17 @@ function smartSplit(text, maxParts) {
+ 
+   if (text.length < 100) return [text];
+ 
++  // --- Separar pregunta final como mensaje aparte ---
++  const lastQuestion = text.match(/[^.!?\n]*\?[^?\n]*$/);
++  if (lastQuestion && lastQuestion[0].trim().length > 15 && lastQuestion[0].trim().length < 150) {
++    const questionText = lastQuestion[0].trim();
++    const withoutQuestion = text.slice(0, text.lastIndexOf(lastQuestion[0])).trim();
++    if (withoutQuestion.length > 50) {
++      const bodyParts = smartSplit(withoutQuestion, Math.max(1, maxParts - 1));
++      return [...bodyParts, questionText];
++    }
++  }
++
+   const isShortReply = text.length < 150;
+   const hasProductList = /\$[\d.,]+/.test(text) && (/combo|opci[oÃÂ³]n|precio/i.test(text));
+   const hasBenefits = /(beneficio|sirve para|ayuda a|mejora|reduce|promueve)/i.test(text);
+diff --git a/src/baileys.js b/src/baileys.js
+index 9c5178c..a4d0525 100644
+--- a/src/baileys.js
++++ b/src/baileys.js
+@@ -276,11 +276,43 @@ async function connectToWhatsApp() {
+ 
+       console.log((fromMe ? '-> ' : '<- ') + senderName + ': ' + (messageText || '').substring(0, 50) + ' [' + messageType + ']');
+ 
++      // --- Subir media (audio/image/video) a Supabase Storage para obtener URL pública ---
++      let mediaUrl = null;
++      if (['audio', 'image', 'video'].includes(messageType) && !fromMe) {
++        try {
++          const buffer = await downloadMediaMessage(msg, 'buffer', {});
++          if (buffer && buffer.length > 0) {
++            const ext = messageType === 'audio' ? 'ogg' : messageType === 'image' ? 'jpg' : 'mp4';
++            const fileName = `${storageId}/${Date.now()}_${msg.key.id?.substring(0, 8)}.${ext}`;
++            const mime = messageType === 'audio'
++              ? (msg.message?.audioMessage?.mimetype || 'audio/ogg')
++              : messageType === 'image'
++                ? (msg.message?.imageMessage?.mimetype || 'image/jpeg')
++                : (msg.message?.videoMessage?.mimetype || 'video/mp4');
++            const { data: uploadData, error: uploadErr } = await supabaseClient.storage
++              .from('wa-media')
++              .upload(fileName, buffer, { contentType: mime, upsert: true });
++            if (!uploadErr && uploadData) {
++              const { data: urlData } = supabaseClient.storage
++                .from('wa-media')
++                .getPublicUrl(fileName);
++              mediaUrl = urlData?.publicUrl || null;
++              console.log('[Media] Subido:', messageType, '->', mediaUrl?.substring(0, 80));
++            } else if (uploadErr) {
++              console.error('[Media] Error subiendo:', uploadErr.message);
++            }
++          }
++        } catch (mediaErr) {
++          console.error('[Media] Error descargando:', mediaErr.message);
++        }
++      }
++
+       await saveMessage(storageId, senderName, {
+         messageId: msg.key.id,
+         text: messageText,
+         type: messageType,
+         fromMe,
++        mediaUrl,
+         timestamp: timestamp ? (typeof timestamp === 'object' ? timestamp.low : timestamp) : Math.floor(Date.now() / 1000)
+       });
+ 
+-- 
+2.34.1
+

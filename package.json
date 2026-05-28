@@ -11,12 +11,17 @@
     "@hapi/boom": "^10.0.1",
     "@supabase/supabase-js": "^2.39.0",
     "@whiskeysockets/baileys": "^6.7.9",
+    "baileys-antiban": "^3.8.1",
+    "baileys_helpers": "^1.0.15",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
     "express": "^4.18.2",
+    "ffmpeg-static": "^5.2.0",
     "node-cache": "^5.1.2",
     "pino": "^8.16.2",
-    "qrcode": "^1.5.3"
+    "qrcode": "^1.5.3",
+    "socks-proxy-agent": "^8.0.2",
+    "https-proxy-agent": "^7.0.4"
   },
   "engines": {
     "node": ">=18.0.0"

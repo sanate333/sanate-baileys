@@ -145,28 +145,23 @@ async function useSupabaseAuthState(supabase) {
   const { state, saveCreds: originalSaveCreds } = await useMultiFileAuthState(AUTH_DIR);
 
   // Step 3: Wrap saveCreds to also persist to Supabase
-  // Wrap keys.set para sincronizar sesiones Signal a Supabase en tiempo real
-  // Esto previene el error "Bad MAC" despues de reinicios del servidor
-  let _sessionSyncTimer = null;
-  const _originalKeysSet = state.keys.set.bind(state.keys);
-  state.keys.set = async (data) => {
-    await _originalKeysSet(data);
-    // Si hay cambios de sesion, sincronizar a Supabase (debounced 4s)
-    if (data && (data['session'] || data['sender-key'] || data['app-state-sync-key'])) {
-      clearTimeout(_sessionSyncTimer);
-      _sessionSyncTimer = setTimeout(() => {
-        saveAuthToSupabase(supabase).catch(err =>
-          console.error('[AUTH] Session sync error:', err.message)
-        );
-      }, 4000);
-    }
-  };
+  // NOTA: NO wrapeamos keys.set — cada cambio de clave Signal disparaba
+  // millones de escrituras a Supabase (3M+ updates) y agoto la cuota.
+  // Solo guardamos en momentos criticos: creds.update y connection=open.
+  let _lastSaveTime = 0;
+  const SAVE_COOLDOWN = 30000; // Minimo 30s entre saves para no agotar cuota
 
   const saveCreds = async () => {
     await originalSaveCreds();
-    // Save to Supabase in background (don't await to avoid blocking)
-    saveAuthToSupabase(supabase).catch(err => {
-      console.error('[AUTH] Background save failed:', err.message);
+    // Debounce: no guardar mas de 1 vez cada 30s
+    const now = Date.now();
+    if (now - _lastSaveTime < SAVE_COOLDOWN) return;
+    _lastSaveTime = now;
+    // Save to Supabase in background
+    saveAuthToSupabase(supabase).then(() => {
+      console.log('[AUTH] Creds guardadas en Supabase OK');
+    }).catch(err => {
+      console.error('[AUTH] Background save FAILED:', err.message);
     });
   };
 

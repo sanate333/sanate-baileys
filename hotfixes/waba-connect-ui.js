@@ -70,12 +70,31 @@
   var botTypingChats = new Set();
   var msgStatusMap   = new Map();
 
+  var _sseRetries = 0;
+  var _sseMaxRetries = 5;
+  var _sseCurrentES = null;
+
   function conectarSSE() {
+    if (_sseRetries >= _sseMaxRetries) {
+      console.warn('[WABA-UI] SSE: max reintentos alcanzado, detenido');
+      return;
+    }
     try {
+      if (_sseCurrentES) { try { _sseCurrentES.close(); } catch(e){} }
       var es = new EventSource(BOT_SSE);
+      _sseCurrentES = es;
+      es.onopen = function() { _sseRetries = 0; };
       es.onmessage = function (evt) { try { manejarEvento(JSON.parse(evt.data)); } catch (e) {} };
-      es.onerror   = function () { es.close(); setTimeout(conectarSSE, 6000); };
-    } catch (e) { setTimeout(conectarSSE, 8000); }
+      es.onerror = function () {
+        es.close(); _sseCurrentES = null;
+        _sseRetries++;
+        var delay = Math.min(6000 * Math.pow(2, _sseRetries - 1), 60000);
+        setTimeout(conectarSSE, delay);
+      };
+    } catch (e) {
+      _sseRetries++;
+      setTimeout(conectarSSE, 15000);
+    }
   }
 
   function manejarEvento(data) {

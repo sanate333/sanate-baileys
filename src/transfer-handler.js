@@ -1,0 +1,457 @@
+/*  transfer-handler.js  —  Bank transfer verification for Sánate WhatsApp Bot
+ *  Handles screenshot flow, reviewer approval/fraud/block via WA receptor.
+ */
+
+let supabase = null;
+let sock = null;
+let config = { transfer_wa_receptor: null, transfer_enabled: false };
+
+// baileys_helper — inyecta nodos binarios requeridos para botones interactivos
+let _baileysHelper = null;
+function getBaileysHelper() {
+  if (!_baileysHelper) {
+    try {
+      _baileysHelper = require('baileys_helper');
+      log('baileys_helper cargado OK');
+    } catch (e) {
+      log('baileys_helper no disponible:', e.message);
+      _baileysHelper = {};
+    }
+  }
+  return _baileysHelper;
+}
+
+// Baileys internals para fallback relay
+function getBaileysFns() {
+  try {
+    const baileys = require('@whiskeysockets/baileys');
+    return { generateWAMessageFromContent: baileys.generateWAMessageFromContent || baileys.default?.generateWAMessageFromContent };
+  } catch (e) { return {}; }
+}
+
+// In-memory map: transferId -> { clientJid, phone, pushName, orderSummary, total, paymentMethod }
+const pendingTransfers = new Map();
+
+// Track last order context per chat so handleScreenshot can reference it
+const lastOrderContext = new Map();
+
+// ── helpers ──────────────────────────────────────────────────────────────────
+
+function log(...args) { console.log('[Transfer]', ...args); }
+function logErr(...args) { console.error('[Transfer]', ...args); }
+
+function receptorJid() {
+  if (!config.transfer_wa_receptor) return null;
+  const num = config.transfer_wa_receptor.replace(/\D/g, '');
+  return num + '@s.whatsapp.net';
+}
+
+// ── exported functions ───────────────────────────────────────────────────────
+
+async function initTransferHandler(sb, socket) {
+  try {
+    supabase = sb;
+    sock = socket;
+    const { data: rows, error } = await supabase
+      .from('oasis_wa_config')
+      .select('transfer_wa_receptor, transfer_enabled')
+      .eq('id', 'default')
+      .limit(1);
+    if (error) throw error;
+    const data = rows && rows[0];
+    if (data) {
+      config.transfer_wa_receptor = data.transfer_wa_receptor || null;
+      config.transfer_enabled = !!data.transfer_enabled;
+    }
+    log('Initialized — receptor:', config.transfer_wa_receptor, '| enabled:', config.transfer_enabled);
+  } catch (err) {
+    logErr('initTransferHandler error:', err.message || err);
+  }
+}
+
+function updateSocket(socket) {
+  sock = socket;
+  log('Socket updated');
+}
+
+function getConfig() {
+  return { ...config };
+}
+
+/**
+ * Detect payment method keywords in Spanish text.
+ * @returns {'bancolombia'|'nequi'|'transferencia'|null}
+ */
+function detectPaymentMethod(text) {
+  if (!text) return null;
+  const lower = text.toLowerCase();
+  if (/bancolombia/i.test(lower)) return 'bancolombia';
+  if (/nequi/i.test(lower)) return 'nequi';
+  if (/transferencia|consignaci[oó]n/i.test(lower)) return 'transferencia';
+  return null;
+}
+
+/**
+ * Activate screenshot-wait mode for a chat.
+ */
+async function activateScreenshotMode(chatJid, pushName, orderSummary, total, paymentMethod) {
+  try {
+    // 1. Flag the chat
+    const { error } = await supabase
+      .from('oasis_wa_chats')
+      .update({ awaiting_screenshot: true, awaiting_screenshot_since: new Date().toISOString() })
+      .eq('jid', chatJid);
+    if (error) logErr('activateScreenshotMode update error:', error.message);
+
+    // Store order context for later use in handleScreenshot
+    lastOrderContext.set(chatJid, { orderSummary, total, paymentMethod });
+
+    // 2. Send confirmation message to client
+    const msg = `Perfecto ${pushName}! Tu pedido:\n\n${orderSummary}\n\n💰 Total: $${total}\n\nPor favor envía el pantallazo de la transferencia por ${paymentMethod} y quedamos atentos para procesarlo 🙌`;
+    await sock.sendMessage(chatJid, { text: msg });
+    log('Screenshot mode activated for', chatJid);
+
+    // 3. Schedule 15-minute reminder
+    setTimeout(() => {
+      checkScreenshotReminder(chatJid, pushName).catch(e => logErr('Reminder error:', e.message || e));
+    }, 15 * 60 * 1000);
+  } catch (err) {
+    logErr('activateScreenshotMode error:', err.message || err);
+  }
+}
+
+/**
+ * Check if a chat is awaiting a screenshot.
+ * @returns {Promise<boolean>}
+ */
+async function isAwaitingScreenshot(chatJid) {
+  try {
+    const { data, error } = await supabase
+      .from('oasis_wa_chats')
+      .select('awaiting_screenshot')
+      .eq('jid', chatJid)
+      .single();
+    if (error) { logErr('isAwaitingScreenshot error:', error.message); return false; }
+    return !!(data && data.awaiting_screenshot);
+  } catch (err) {
+    logErr('isAwaitingScreenshot error:', err.message || err);
+    return false;
+  }
+}
+
+/**
+ * Process an incoming screenshot image from a client awaiting verification.
+ */
+async function handleScreenshot(chatJid, phone, pushName, mediaUrl, _imageAnalysis) {
+  try {
+    // Retrieve stored order context
+    const ctx = lastOrderContext.get(chatJid) || {};
+    const orderSummary = ctx.orderSummary || '(sin resumen)';
+    const total = ctx.total || 0;
+    const paymentMethod = ctx.paymentMethod || 'transferencia';
+
+    // 1. Insert transfer record
+    const { data: inserted, error: insertErr } = await supabase
+      .from('oasis_wa_transfers')
+      .insert({
+        chat_jid: chatJid,
+        phone,
+        push_name: pushName,
+        image_url: mediaUrl,
+        order_summary: orderSummary,
+        total,
+        payment_method: paymentMethod,
+        status: 'pending'
+      })
+      .select('id')
+      .single();
+
+    if (insertErr) throw insertErr;
+    const transferId = inserted.id;
+
+    // Store in-memory for reviewer lookup
+    pendingTransfers.set(transferId, { clientJid: chatJid, phone, pushName, orderSummary, total, paymentMethod });
+
+    // 2. Confirm to client
+    await sock.sendMessage(chatJid, { text: '📸 Recibimos tu pantallazo! En un momento lo confirmaremos, por favor esperar... ⏳' });
+
+    // 3. Clear awaiting_screenshot flag
+    await supabase
+      .from('oasis_wa_chats')
+      .update({ awaiting_screenshot: false })
+      .eq('jid', chatJid);
+
+    // 4. Forward to receptor as SINGLE message (image + text + buttons)
+    const rJid = receptorJid();
+    if (!rJid) { logErr('No receptor JID configured'); return; }
+
+    const reviewText =
+      `🔔 NUEVO PANTALLAZO DE PAGO\n\n` +
+      `👤 Cliente: ${pushName} (${phone})\n` +
+      `📋 Pedido: ${orderSummary}\n` +
+      `💰 Total: $${total}\n` +
+      `🏦 Método: ${paymentMethod}`;
+
+    const nativeButtons = [
+      { name: 'quick_reply', buttonParamsJson: JSON.stringify({ display_text: '✅ Confirmado', id: 'transfer_approve_' + transferId }) },
+      { name: 'quick_reply', buttonParamsJson: JSON.stringify({ display_text: '⚠️ Posible estafa', id: 'transfer_fraud_' + transferId }) },
+      { name: 'quick_reply', buttonParamsJson: JSON.stringify({ display_text: '🚫 Bloquear', id: 'transfer_block_' + transferId }) }
+    ];
+
+    // Download image for header
+    let imgBuffer = null;
+    try {
+      const https = require('https');
+      const http = require('http');
+      imgBuffer = await new Promise((resolve, reject) => {
+        const mod = mediaUrl.startsWith('https') ? https : http;
+        mod.get(mediaUrl, (resp) => {
+          const chunks = [];
+          resp.on('data', c => chunks.push(c));
+          resp.on('end', () => resolve(Buffer.concat(chunks)));
+          resp.on('error', reject);
+        }).on('error', reject);
+      });
+      log('Image downloaded for header, size:', imgBuffer.length);
+    } catch (dlErr) {
+      logErr('Error downloading image for header:', dlErr.message);
+    }
+
+    let buttonsSent = false;
+
+    // Try sending SINGLE message: image header + text + buttons via relay
+    try {
+      const baileys = require('@whiskeysockets/baileys');
+      const { generateWAMessageFromContent: genMsg, prepareWAMessageMedia, isJidGroup: isGroup } = baileys;
+      if (!genMsg) throw new Error('generateWAMessageFromContent not available');
+
+      const interactiveMsg = {
+        body: { text: reviewText },
+        footer: { text: 'Sánate Bot • Verificación de pago' },
+        nativeFlowMessage: {
+          buttons: nativeButtons.map(b => ({ name: b.name, buttonParamsJson: b.buttonParamsJson })),
+          messageParamsJson: '',
+          messageVersion: 1
+        }
+      };
+
+      // Attach image header if available
+      if (imgBuffer && prepareWAMessageMedia) {
+        try {
+          const mediaMsg = await prepareWAMessageMedia({ image: imgBuffer }, { upload: sock.waUploadToServer });
+          if (mediaMsg && mediaMsg.imageMessage) {
+            interactiveMsg.header = { hasMediaAttachment: true, imageMessage: mediaMsg.imageMessage };
+            log('Image header attached to interactive message');
+          }
+        } catch (mediaErr) {
+          logErr('Error preparing media for header:', mediaErr.message);
+        }
+      }
+
+      const msgContent = { interactiveMessage: interactiveMsg };
+      const senderJid = sock.user?.id || rJid;
+      const genId = baileys.generateMessageIDV2 || baileys.generateMessageID;
+      const wamsg = genMsg(rJid, msgContent, { userJid: senderJid, messageId: genId ? genId(senderJid) : undefined });
+      const additionalNodes = [
+        { tag: 'biz', attrs: {}, content: [{ tag: 'interactive', attrs: { type: 'native_flow', v: '1' }, content: [{ tag: 'native_flow', attrs: { v: '9', name: 'mixed' } }] }] }
+      ];
+      if (!isGroup(rJid)) additionalNodes.push({ tag: 'bot', attrs: { biz_bot: '1' } });
+      await sock.relayMessage(rJid, wamsg.message, { messageId: wamsg.key.id, additionalNodes });
+      buttonsSent = true;
+      log('Single message (image+text+buttons) sent OK');
+    } catch (btnErr) {
+      logErr('Error sending combined message:', btnErr.message);
+    }
+
+    // Fallback: send image separately + text with buttons
+    if (!buttonsSent) {
+      log('Fallback: sending image + text separately');
+      if (imgBuffer) {
+        await sock.sendMessage(rJid, { image: imgBuffer, caption: `Comprobante de ${pushName} (${phone})` });
+      }
+      const fallback = reviewText + '\n\nResponde con el número:\n1️⃣ Confirmado\n2️⃣ Posible estafa\n3️⃣ Bloquear';
+      await sock.sendMessage(rJid, { text: fallback });
+    }
+
+    log('Screenshot forwarded to receptor, transferId:', transferId);
+  } catch (err) {
+    logErr('handleScreenshot error:', err.message || err);
+  }
+}
+
+/**
+ * Handle a text/button response from the WA receptor (reviewer).
+ */
+async function handleReviewerResponse(chatJid, messageText) {
+  try {
+    const text = (messageText || '').trim().toLowerCase();
+
+    // Determine action from text or button id
+    let action = null;
+    let transferIdFromButton = null;
+
+    if (/^transfer_approve_/.test(text)) {
+      action = 'approve';
+      transferIdFromButton = text.replace('transfer_approve_', '');
+    } else if (/^transfer_fraud_/.test(text)) {
+      action = 'fraud';
+      transferIdFromButton = text.replace('transfer_fraud_', '');
+    } else if (/^transfer_block_/.test(text)) {
+      action = 'block';
+      transferIdFromButton = text.replace('transfer_block_', '');
+    } else if (text === '1' || /confirmado/i.test(text)) {
+      action = 'approve';
+    } else if (text === '2' || /estafa/i.test(text)) {
+      action = 'fraud';
+    } else if (text === '3' || /bloquear/i.test(text)) {
+      action = 'block';
+    }
+
+    if (!action) return false; // Not a reviewer command
+
+    // Find the transfer — by button ID (DB first, then Map), or latest pending
+    let transfer = null;
+
+    if (transferIdFromButton) {
+      // 1. Try DB lookup by exact ID (works even after server restart)
+      try {
+        const { data: dbTransfer, error: dbErr } = await supabase
+          .from('oasis_wa_transfers')
+          .select('*')
+          .eq('id', transferIdFromButton)
+          .single();
+        if (!dbErr && dbTransfer) {
+          transfer = {
+            id: dbTransfer.id,
+            clientJid: dbTransfer.chat_jid,
+            phone: dbTransfer.phone,
+            pushName: dbTransfer.push_name,
+            orderSummary: dbTransfer.order_summary,
+            total: dbTransfer.total,
+            paymentMethod: dbTransfer.payment_method
+          };
+          log('Transfer found in DB by button ID:', transferIdFromButton);
+        }
+      } catch (e) { logErr('DB lookup by ID error:', e.message); }
+
+      // 2. Fallback to in-memory Map
+      if (!transfer && pendingTransfers.has(transferIdFromButton)) {
+        transfer = { id: transferIdFromButton, ...pendingTransfers.get(transferIdFromButton) };
+        log('Transfer found in memory Map:', transferIdFromButton);
+      }
+    }
+
+    // 3. Last resort: latest pending transfer from DB
+    if (!transfer) {
+      const { data, error } = await supabase
+        .from('oasis_wa_transfers')
+        .select('*')
+        .eq('status', 'pending')
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .single();
+      if (error || !data) { logErr('No pending transfer found in DB'); return false; }
+      transfer = {
+        id: data.id,
+        clientJid: data.chat_jid,
+        phone: data.phone,
+        pushName: data.push_name,
+        orderSummary: data.order_summary,
+        total: data.total,
+        paymentMethod: data.payment_method
+      };
+      log('Transfer found as latest pending:', transfer.id);
+    }
+
+    const rJid = receptorJid();
+
+    if (action === 'approve') {
+      await supabase
+        .from('oasis_wa_transfers')
+        .update({ status: 'approved', reviewed_at: new Date().toISOString() })
+        .eq('id', transfer.id);
+      await sock.sendMessage(transfer.clientJid, {
+        text: '✅ ¡Pantallazo confirmado! Tu envío ya va en camino, solo 1 a 3 días hábiles por Interrapidísimo 📦🚀'
+      });
+      if (rJid) await sock.sendMessage(rJid, { text: `✅ Transferencia de ${transfer.pushName} aprobada.` });
+      log('Transfer approved:', transfer.id);
+    } else if (action === 'fraud') {
+      await supabase
+        .from('oasis_wa_transfers')
+        .update({ status: 'fraud', reviewed_at: new Date().toISOString() })
+        .eq('id', transfer.id);
+      // Archive client chat
+      await supabase
+        .from('oasis_wa_chats')
+        .update({ archived: true })
+        .eq('jid', transfer.clientJid);
+      if (rJid) await sock.sendMessage(rJid, { text: '⚠️ Chat archivado para revisión manual.' });
+      log('Transfer flagged as fraud:', transfer.id);
+    } else if (action === 'block') {
+      await supabase
+        .from('oasis_wa_transfers')
+        .update({ status: 'blocked', reviewed_at: new Date().toISOString() })
+        .eq('id', transfer.id);
+      await sock.sendMessage(transfer.clientJid, {
+        text: 'Este pantallazo es falso. Dios te bendiga. 🙏'
+      });
+      // Block: update config to prevent auto-replies for this client
+      try {
+        const { data: cfgRows } = await supabase
+          .from('oasis_wa_config')
+          .select('id, contact_map')
+          .eq('id', 'default')
+          .limit(1);
+        const cfgData = cfgRows && cfgRows[0];
+        const contactMap = (cfgData && cfgData.contact_map) || {};
+        contactMap[transfer.clientJid] = false;
+        await supabase
+          .from('oasis_wa_config')
+          .update({ contact_map: contactMap })
+          .eq('id', 'default');
+      } catch (blockErr) {
+        logErr('Error updating contact_map for block:', blockErr.message || blockErr);
+      }
+      if (rJid) await sock.sendMessage(rJid, { text: `🚫 Cliente ${transfer.pushName} bloqueado.` });
+      log('Transfer blocked:', transfer.id);
+    }
+
+    // Clean up in-memory
+    pendingTransfers.delete(transfer.id);
+    return true;
+  } catch (err) {
+    logErr('handleReviewerResponse error:', err.message || err);
+    return false;
+  }
+}
+
+/**
+ * 15-minute reminder — if still awaiting, nudge the client.
+ */
+async function checkScreenshotReminder(chatJid, pushName) {
+  try {
+    const still = await isAwaitingScreenshot(chatJid);
+    if (!still) return;
+    await sock.sendMessage(chatJid, {
+      text: `Hola ${pushName}! Estamos atentos para procesar tu envío 📦 Cuando tengas el pantallazo de la transferencia, envíanoslo por aquí 🙌`
+    });
+    log('Reminder sent to', chatJid);
+  } catch (err) {
+    logErr('checkScreenshotReminder error:', err.message || err);
+  }
+}
+
+// ── exports ──────────────────────────────────────────────────────────────────
+
+module.exports = {
+  initTransferHandler,
+  updateSocket,
+  getConfig,
+  detectPaymentMethod,
+  activateScreenshotMode,
+  isAwaitingScreenshot,
+  handleScreenshot,
+  handleReviewerResponse,
+  checkScreenshotReminder
+};
+    

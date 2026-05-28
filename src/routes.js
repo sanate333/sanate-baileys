@@ -1,10 +1,10 @@
 const express = require('express');
 const router = express.Router();
 const QRCode = require('qrcode');
-const { getConnectionState, getQR, getProfilePhoto, getContactName, sendMessage, disconnect, getSocket, contactCache } = require('./baileys');
-const { getChats, getMessages, saveMessage, upsertChat } = require('./supabase');
-const { getConfig, setConfig, getUsageStats, handleIncomingMessage } = require('./auto-reply');
-const { getAudioSettings, saveAudioSettings, sendAudioTest } = require('./audio-tts');
+const { getConnectionState, getQR, getQrAttempts, getProfilePhoto, getContactName, sendMessage, disconnect, startConnection, getSocket, contactCache, getAntiBan, getDebugFlags } = require('./baileys');
+const { getChats, getMessages, saveMessage, upsertChat, getSupabase } = require('./supabase');
+const { getConfig, setConfig, getUsageStats, handleIncomingMessage, setMetaSendFunction, setAntiBanGetter, antiBanGuard, antiBanAfterSend, isBotWithinSchedule, invalidateScheduleCache } = require('./auto-reply');
+const { getAudioSettings, saveAudioSettings, sendAudioTest, generateVoicePreview } = require('./audio-tts');
 
 // Baileys internals para envio directo de mensajes interactivos (relayMessage)
 let _baileys = null;
@@ -18,6 +18,21 @@ function getBaileysFns() {
     }
   }
   return _baileys;
+}
+
+// baileys_helper — inyecta nodos binarios (biz/interactive/native_flow/bot) que WhatsApp requiere
+let _baileysHelper = null;
+function getBaileysHelper() {
+  if (!_baileysHelper) {
+    try {
+      _baileysHelper = require('baileys_helper');
+      console.log('[baileys_helper] Cargado OK — funciones:', Object.keys(_baileysHelper).join(', '));
+    } catch (e) {
+      console.error('[baileys_helper] No se pudo cargar:', e.message);
+      _baileysHelper = {};
+    }
+  }
+  return _baileysHelper;
 }
 
 // === HELPER: Descargar media como Buffer (mas confiable que pasar URL a Baileys) ===
@@ -95,60 +110,162 @@ function buildInteractiveNodes(buttons, jid) {
   ];
 }
 
-// === HELPER PRINCIPAL: Enviar mensaje interactivo con proto directo ===
+// === ANTI-BAN WRAPPER: Protege CUALQUIER envío interactivo con las 5 capas anti-ban ===
+// Si anti-ban bloquea Baileys, intenta Cloud API (sendMetaButtons/sendMetaList).
+// Retorna { result, method, antiban } — method puede ser 'baileys', 'meta', 'blocked'.
+async function safeSendInteractive(chatId, { sendFn, metaFallbackFn, label }) {
+  const jid = chatId.includes('@') ? chatId : chatId + '@s.whatsapp.net';
+  const guard = await antiBanGuard(jid, label || 'interactive');
+
+  if (!guard.allowed) {
+    console.log('[safeSend] BLOQUEADO por anti-ban:', guard.reason, '—', label);
+    return { result: null, method: 'blocked', antiban: guard.reason };
+  }
+
+  // Si anti-ban recomienda Cloud API, intentar meta primero
+  if (guard.fallbackToMeta && metaFallbackFn && metaCloudEnabled()) {
+    try {
+      console.log('[safeSend] Anti-ban recomienda Cloud API:', guard.reason, '—', label);
+      const metaResult = await metaFallbackFn();
+      antiBanAfterSend(jid, label);
+      return { result: metaResult, method: 'meta', antiban: guard.reason };
+    } catch (metaErr) {
+      console.warn('[safeSend] Cloud API fallback falló:', metaErr.message, '— intentando Baileys');
+    }
+  }
+
+  // Esperar delay recomendado por anti-ban
+  if (guard.delayMs > 0) {
+    await new Promise(r => setTimeout(r, guard.delayMs));
+  }
+
+  // Enviar por Baileys
+  try {
+    const result = await sendFn();
+    antiBanAfterSend(jid, label);
+    return { result, method: 'baileys', antiban: null };
+  } catch (err) {
+    // Si Baileys falla y hay Cloud API disponible, intentar como último recurso
+    if (metaFallbackFn && metaCloudEnabled()) {
+      try {
+        console.log('[safeSend] Baileys falló, último recurso Cloud API —', label);
+        const metaResult = await metaFallbackFn();
+        antiBanAfterSend(jid, label);
+        return { result: metaResult, method: 'meta', antiban: 'baileys-failed' };
+      } catch (metaErr2) {
+        console.error('[safeSend] Ambos canales fallaron —', label);
+      }
+    }
+    throw err; // Re-throw si todo falla
+  }
+}
+
+// === HELPER PRINCIPAL: Enviar mensaje interactivo via baileys_helper (inyecta nodos binarios) ===
 async function sendInteractiveMessageDirect(chatId, { buffer, contentType, mediaType, captionText, footerText, nativeButtons }) {
   const sock = getSocket();
   if (!sock) throw new Error('Socket de WhatsApp no disponible');
-  if (!sock.relayMessage) throw new Error('sock.relayMessage no disponible');
-
-  const { generateWAMessageFromContent, prepareWAMessageMedia } = getBaileysFns();
-  if (!generateWAMessageFromContent) throw new Error('generateWAMessageFromContent no disponible');
 
   const jid = chatId.includes('@') ? chatId : chatId + '@s.whatsapp.net';
+  const helper = getBaileysHelper();
 
-  let header = { hasMediaAttachment: false };
-  if (buffer && prepareWAMessageMedia) {
-    const isVideo = mediaType === 'video';
-    const mediaPayload = isVideo
-      ? { video: buffer, mimetype: contentType || 'video/mp4' }
-      : { image: buffer, mimetype: contentType || 'image/jpeg' };
+  // Convertir nativeButtons al formato que espera baileys_helper
+  const interactiveButtons = (nativeButtons || []).map(btn => {
+    // Si ya tiene name + buttonParamsJson, pasarlo directo
+    if (btn.name && btn.buttonParamsJson) return btn;
+    // Legacy: { id, text } -> quick_reply
+    if (btn.id && btn.text) {
+      return { name: 'quick_reply', buttonParamsJson: JSON.stringify({ display_text: btn.text, id: btn.id }) };
+    }
+    // Legacy: { buttonId, buttonText } -> quick_reply
+    if (btn.buttonId || btn.buttonText) {
+      const label = btn.buttonText?.displayText || btn.text || 'Opción';
+      return { name: 'quick_reply', buttonParamsJson: JSON.stringify({ display_text: label, id: btn.buttonId || btn.id || 'btn' }) };
+    }
+    return btn;
+  });
 
-    const uploaded = await prepareWAMessageMedia(mediaPayload, { upload: sock.waUploadToServer });
-    header = {
-      ...(isVideo ? { videoMessage: uploaded.videoMessage } : { imageMessage: uploaded.imageMessage }),
-      hasMediaAttachment: true
-    };
+  // Si baileys_helper está disponible, usar sendInteractiveMessage (inyecta nodos binarios)
+  if (helper.sendInteractiveMessage) {
+    console.log('[interactive-helper] Enviando via baileys_helper a:', jid, '| botones:', interactiveButtons.length);
+    const result = await helper.sendInteractiveMessage(sock, jid, {
+      text: captionText || '',
+      footer: footerText || '',
+      interactiveButtons
+    });
+    console.log('[interactive-helper] Enviado OK, msgId:', result?.key?.id);
+    return result;
   }
 
-  const msgContent = {
-    interactiveMessage: {
-      header,
-      body: { text: captionText || '' },
-      footer: { text: footerText || '' },
-      nativeFlowMessage: {
-        buttons: nativeButtons,
-        messageParamsJson: '',
-        messageVersion: 1
-      }
+  // Fallback: si baileys_helper no cargó, intentar sendButtons
+  if (helper.sendButtons) {
+    console.log('[interactive-helper] Usando sendButtons fallback');
+    return await helper.sendButtons(sock, jid, {
+      text: captionText || '',
+      footer: footerText || '',
+      buttons: interactiveButtons
+    });
+  }
+
+  // Fallback: relay manual CON additionalNodes (biz + interactive + bot tags requeridos por WhatsApp)
+  console.log('[interactive-helper] Usando relay manual con additionalNodes | media:', !!buffer);
+  const baileys = require('@whiskeysockets/baileys');
+  const { generateWAMessageFromContent: genMsg, normalizeMessageContent, isJidGroup: isGroup, prepareWAMessageMedia } = baileys;
+  if (!genMsg) throw new Error('No hay método disponible para enviar botones interactivos');
+
+  // Build interactive message — with optional image header
+  const interactiveMsg = {
+    body: { text: captionText || '' },
+    footer: { text: footerText || '' },
+    nativeFlowMessage: {
+      buttons: interactiveButtons.map(b => ({ name: b.name || 'quick_reply', buttonParamsJson: b.buttonParamsJson })),
+      messageParamsJson: '',
+      messageVersion: 1
     }
   };
 
-  const senderJid = sock.user?.id || jid;
-  const wamsg = generateWAMessageFromContent(jid, msgContent, {
-    userJid: senderJid
-  });
+  // If buffer provided, upload media and attach as header image
+  if (buffer) {
+    try {
+      const mediaMsg = await prepareWAMessageMedia(
+        { image: buffer },
+        { upload: sock.waUploadToServer }
+      );
+      if (mediaMsg && mediaMsg.imageMessage) {
+        interactiveMsg.header = {
+          hasMediaAttachment: true,
+          imageMessage: mediaMsg.imageMessage
+        };
+        console.log('[interactive-helper] Image header attached OK');
+      }
+    } catch (mediaErr) {
+      console.error('[interactive-helper] Error uploading media for header:', mediaErr.message);
+      // Continue without image header
+    }
+  }
 
-  console.log('[relay-buttons] senderJid:', senderJid, '| recipient:', jid);
-  await sock.relayMessage(jid, wamsg.message, { messageId: wamsg.key.id });
+  const msgContent = { interactiveMessage: interactiveMsg };
+  const senderJid = sock.user?.id || jid;
+  const genId = baileys.generateMessageIDV2 || baileys.generateMessageID;
+  const wamsg = genMsg(jid, msgContent, { userJid: senderJid, messageId: genId ? genId(senderJid) : undefined });
+
+  // additionalNodes — CRITICAL: sin estos, WhatsApp ignora los botones
+  const additionalNodes = [
+    { tag: 'biz', attrs: {}, content: [{ tag: 'interactive', attrs: { type: 'native_flow', v: '1' }, content: [{ tag: 'native_flow', attrs: { v: '9', name: 'mixed' } }] }] }
+  ];
+  // Para chats privados (no grupos), agregar tag <bot biz_bot='1'>
+  if (!isGroup(jid)) {
+    additionalNodes.push({ tag: 'bot', attrs: { biz_bot: '1' } });
+  }
+
+  await sock.relayMessage(jid, wamsg.message, { messageId: wamsg.key.id, additionalNodes });
+  console.log('[interactive-helper] Relay con additionalNodes OK, msgId:', wamsg.key?.id);
   return wamsg;
 }
 
-// === HELPER: Enviar lista interactiva con single_select nativeFlowMessage ===
+// === HELPER: Enviar lista interactiva con single_select via baileys_helper ===
 async function sendListMessageDirect(chatId, { captionText, footerText, headerTitle, buttonText, sections }) {
   const sock = getSocket();
   if (!sock) throw new Error('Socket de WhatsApp no disponible');
-  const { generateWAMessageFromContent } = getBaileysFns();
-  if (!generateWAMessageFromContent) throw new Error('generateWAMessageFromContent no disponible');
 
   const jid = chatId.includes('@') ? chatId : chatId + '@s.whatsapp.net';
 
@@ -161,33 +278,40 @@ async function sendListMessageDirect(chatId, { captionText, footerText, headerTi
     }))
   }));
 
-  const singleSelectButton = {
+  const interactiveButtons = [{
     name: 'single_select',
     buttonParamsJson: JSON.stringify({
       title: buttonText || 'Ver opciones',
       sections: selectSections
     })
-  };
+  }];
 
+  const helper = getBaileysHelper();
+  if (helper.sendInteractiveMessage) {
+    console.log('[interactive-list] Enviando lista via baileys_helper a:', jid);
+    const result = await helper.sendInteractiveMessage(sock, jid, {
+      text: captionText || '',
+      footer: footerText || '',
+      interactiveButtons
+    });
+    console.log('[interactive-list] Enviado OK, msgId:', result?.key?.id);
+    return result;
+  }
+
+  // Fallback relay manual
+  console.warn('[interactive-list] baileys_helper no disponible, usando relay manual');
+  const { generateWAMessageFromContent } = getBaileysFns();
+  if (!generateWAMessageFromContent) throw new Error('No hay método para enviar listas');
   const msgContent = {
     interactiveMessage: {
       header: { hasMediaAttachment: false },
       body: { text: captionText || '' },
       footer: { text: footerText || '' },
-      nativeFlowMessage: {
-        buttons: [singleSelectButton],
-        messageParamsJson: '',
-        messageVersion: 1
-      }
+      nativeFlowMessage: { buttons: interactiveButtons, messageParamsJson: '', messageVersion: 1 }
     }
   };
-
   const senderJid = sock.user?.id || jid;
-  const wamsg = generateWAMessageFromContent(jid, msgContent, {
-    userJid: senderJid
-  });
-
-  console.log('[relay-list] senderJid:', senderJid, '| recipient:', jid);
+  const wamsg = generateWAMessageFromContent(jid, msgContent, { userJid: senderJid });
   await sock.relayMessage(jid, wamsg.message, { messageId: wamsg.key.id });
   return wamsg;
 }
@@ -288,6 +412,15 @@ async function sendMetaText(to, text) {
   });
 }
 
+// Inject Cloud API sender into auto-reply module (enables bot replies via Meta when Baileys is down)
+setMetaSendFunction(async (to, text) => {
+  if (!metaCloudEnabled()) throw new Error('Meta Cloud API no configurada');
+  return sendMetaText(to, text);
+});
+
+// Inject anti-ban getter into auto-reply module (enables rate-limiting + warm-up checks in botSend)
+setAntiBanGetter(() => getAntiBan());
+
 // Imagen + caption por Meta Cloud API
 async function sendMetaImage(to, { imageUrl, caption }) {
   return sendMetaCloudRaw(to, {
@@ -351,7 +484,7 @@ function parseMultipart(req, res, next) {
 router.use(parseMultipart);
 
 function auth(req, res, next) {
-  const openPaths = ['/events', '/status', '/qr', '/settings', '/ai-config', '/ai-usage', '/webhook'];
+  const openPaths = ['/events', '/status', '/qr', '/settings', '/ai-config', '/ai-usage', '/webhook', '/voice-preview', '/audio-test', '/schedule', '/backup'];
   if (openPaths.some(p => req.path === p || req.path.startsWith(p))) return next();
   if (process.env.API_SECRET) {
     const token = req.headers.authorization?.replace('Bearer ', '') || req.query.token || req.headers['x-api-key'];
@@ -366,23 +499,55 @@ router.use(auth);
 
 router.get('/status', (req, res) => {
   const RENDER_URL = process.env.RENDER_EXTERNAL_URL || 'https://sanate-wa-bot.onrender.com';
+  const rawState = getConnectionState();
+  // For the frontend panel: treat "reconnecting" as "connected" to prevent UI flicker
+  // The panel polls every 3s and brief reconnects (5s) cause visual oscillation
+  const state = rawState === 'reconnecting' ? 'connected' : rawState;
+  // Determine connection status
+  // Panel "Conexion WhatsApp" section is about Baileys (QR link).
+  // Cloud API runs independently — don't let it mask a disconnected Baileys.
+  const cloudActive = metaCloudEnabled();
+  const baileysActive = state === 'connected';
+  // Primary status = Baileys state. Cloud API is a separate indicator.
+  // Extraer numero de telefono vinculado
+  const _sock = getSocket();
+  const connectedPhone = _sock?.user?.id?.replace(/:.*$/, '')?.replace(/@s\.whatsapp\.net$/, '') || null;
   res.json({
-    status: getConnectionState(), connected: getConnectionState() === 'connected',
-    hasQR: !!getQR(), uptime: Math.floor(process.uptime()),
+    status: baileysActive ? 'connected' : state,
+    connected: baileysActive,
+    baileysConnected: baileysActive,
+    cloudApiConnected: cloudActive,
+    connectedPhone: connectedPhone,
+    rawState: rawState, // expose real state for debugging
+    hasQR: !!getQR(),
+    qrAttempts: getQrAttempts(),
+    uptime: Math.floor(process.uptime()),
     sseClients: req.app.get('sse')?.getStatus()?.clients || 0,
     contactsInCache: contactCache.keys().length,
-    server: 'sanate-wa-server', engine: 'baileys-standalone',
-    metaCloudEnabled: metaCloudEnabled(),
+    server: 'sanate-wa-server', engine: 'dual-channel',
+    metaCloudEnabled: cloudActive,
     timestamp: new Date().toISOString(),
     hotfixes: [
+      RENDER_URL + '/hotfixes/connection-stabilizer.js',
       RENDER_URL + '/hotfixes/waba-connect-ui.js',
       RENDER_URL + '/hotfixes/visual-chat-v2.js',
-      RENDER_URL + '/hotfixes/meta-panel-hotfix.js'
+      RENDER_URL + '/hotfixes/meta-panel-hotfix.js',
+      RENDER_URL + '/hotfixes/qr-rotate.js',
+      RENDER_URL + '/hotfixes/interactive-visual.js',
+      RENDER_URL + '/hotfixes/plantillas-buttons-hotfix.js',
+      RENDER_URL + '/hotfixes/warmup-meter.js',
+      RENDER_URL + '/hotfixes/panel-extras.js?v=4'
     ],
     extraScripts: [
+      RENDER_URL + '/hotfixes/connection-stabilizer.js',
       RENDER_URL + '/hotfixes/waba-connect-ui.js',
       RENDER_URL + '/hotfixes/visual-chat-v2.js',
-      RENDER_URL + '/hotfixes/meta-panel-hotfix.js'
+      RENDER_URL + '/hotfixes/meta-panel-hotfix.js',
+      RENDER_URL + '/hotfixes/qr-rotate.js',
+      RENDER_URL + '/hotfixes/interactive-visual.js',
+      RENDER_URL + '/hotfixes/plantillas-buttons-hotfix.js',
+      RENDER_URL + '/hotfixes/warmup-meter.js',
+      RENDER_URL + '/hotfixes/panel-extras.js?v=4'
     ]
   });
 });
@@ -391,22 +556,64 @@ router.get('/qr', async (req, res) => {
   const qr = getQR();
   const state = getConnectionState();
   if (state === 'connected') return res.json({ status: 'connected', message: 'Ya conectado' });
-  if (!qr) return res.json({ status: 'waiting', message: 'Esperando QR...' });
+  if (state === 'qr_timeout') return res.json({ status: 'qr_timeout', message: 'QR expirado. Presiona Conectar para generar nuevo QR.', attempts: getQrAttempts() });
+  if (state === 'reconnecting') return res.json({ status: 'reconnecting', message: 'Reconectando...' });
+  if (state === 'connecting') return res.json({ status: 'connecting', message: 'Generando QR...' });
+  if (!qr) return res.json({ status: 'waiting', message: 'Esperando QR...', connectionState: state });
   try {
     const qrImage = await QRCode.toDataURL(qr, { width: 300 });
-    res.json({ status: 'qr_ready', qr: qrImage, raw: qr });
-  } catch (err) { res.json({ status: 'qr_ready', qr: null, raw: qr }); }
+    res.json({ status: 'qr_ready', qr: qrImage, raw: qr, attempt: getQrAttempts() });
+  } catch (err) { res.json({ status: 'qr_ready', qr: null, raw: qr, attempt: getQrAttempts() }); }
 });
 
 router.get('/chats', async (req, res) => {
   try {
+    // Si NINGUN canal esta conectado (ni Baileys ni Cloud API), devolver lista vacia
+    const chatState = getConnectionState();
+    const hasCloudApi = metaCloudEnabled();
+    if (chatState !== 'connected' && chatState !== 'reconnecting' && !hasCloudApi) {
+      return res.json({ chats: [], total: 0, source: 'supabase', disconnected: true });
+    }
     const limit = parseInt(req.query.limit) || 100;
-    const chats = await getChats(limit);
+
+    // ── Phone number filtering: if an active phone is set, filter by it ──
+    const supabaseChats = req.app.get('supabase');
+    let activePhone = null;
+    if (supabaseChats) {
+      try {
+        const { data: phoneConfig } = await supabaseChats
+          .from('oasis_wa_config')
+          .select('system_prompt')
+          .eq('id', 'active_phone')
+          .single();
+        if (phoneConfig?.system_prompt) {
+          const parsed = JSON.parse(phoneConfig.system_prompt);
+          if (parsed.phone && !parsed.hidden) activePhone = parsed.phone;
+        }
+      } catch (e) { /* no active phone filter */ }
+    }
+
+    let chats;
+    if (activePhone && supabaseChats) {
+      // Filter chats by phone_number
+      const { data, error } = await supabaseChats
+        .from('oasis_wa_chats')
+        .select('*')
+        .eq('phone_number', activePhone)
+        .order('last_timestamp', { ascending: false })
+        .limit(limit);
+      chats = error ? await getChats(limit) : (data || []);
+    } else {
+      chats = await getChats(limit);
+    }
     const enriched = chats.map(chat => {
       const jidNum = (chat.jid || '').replace(/@s\.whatsapp\.net|@g\.us|@c\.us|@lid/g, '');
       const phone = chat.phone || (/^\d{7,}$/.test(jidNum) ? '+' + jidNum : '');
       const contactName = getContactName(chat.jid);
-      const displayName = contactName || chat.push_name || chat.name || '';
+      /* Multi-layer name resolution: prefer real names over phone numbers */
+      const isPhoneLike = (s) => s && /^\+?\d[\d\s\-().]{6,}$/.test(s.trim()) && s.replace(/[\s+\-().]/g, '').length >= 7;
+      const candidates = [chat.name, chat.push_name, contactName].filter(n => n && !isPhoneLike(n) && !/^s[aá]nate$/i.test(n));
+      const displayName = candidates[0] || chat.push_name || contactName || chat.name || '';
       return {
         ...chat,
         chatId: chat.jid,
@@ -423,8 +630,48 @@ router.get('/chats', async (req, res) => {
         photoUrl: chat.profile_photo_url || '',
       };
     });
-    res.json({ chats: enriched, total: enriched.length, source: 'supabase' });
+    /* ── ANTI-FLASH: filtro estable de @lid (no depende de contactCache mutable) ──
+     * Reglas:
+     * 1. Chats NO-@lid siempre pasan
+     * 2. @lid con nombre "Sánate" (self-ref) → siempre oculto
+     * 3. @lid con actividad reciente (último mensaje < 7 días) → siempre visible
+     * 4. @lid sin nombre Y sin actividad reciente → oculto
+     * Esto evita el flash causado por contactCache cargando asíncronamente.
+     */
+    const _7daysAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
+    const cleaned = enriched.filter(chat => {
+      const jid = chat.chatId || '';
+      if (!jid.includes('@lid')) return true;
+
+      // Siempre ocultar self-references
+      const nm = (chat.pushName || '').trim();
+      if (/^s[aá]nate$/i.test(nm)) return false;
+
+      // Si tiene actividad reciente, SIEMPRE mostrar (independiente del nombre)
+      const lastTs = chat.lastMessageAt || chat.updatedAt || 0;
+      const lastMs = typeof lastTs === 'string' ? new Date(lastTs).getTime() : (lastTs > 1e12 ? lastTs : lastTs * 1000);
+      if (lastMs > _7daysAgo) return true;
+
+      // Sin actividad reciente Y sin nombre real → ocultar
+      if (!nm || /^\d+$/.test(nm)) return false;
+      return true;
+    });
+    res.json({ chats: cleaned, total: cleaned.length, source: 'supabase' });
   } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+/* Expose in-memory contact names from Baileys (WhatsApp profile names) */
+router.get('/contacts/names', (req, res) => {
+  const names = {};
+  const keys = contactCache.keys();
+  keys.forEach(k => {
+    const phone = k.replace(/@s\.whatsapp\.net$|@c\.us$/g, '');
+    const name = contactCache.get(k);
+    if (name && name !== phone && !/^\+?\d[\d\s\-().]{6,}$/.test(name)) {
+      names[phone] = name;
+    }
+  });
+  res.json({ names, count: Object.keys(names).length, source: 'baileys-cache' });
 });
 
 router.get('/chats/:chatId/messages', async (req, res) => {
@@ -503,35 +750,46 @@ router.post('/chats/:chatId/send', async (req, res) => {
         textForLog = '[' + mType + '+btn] ' + captionText.substring(0, 50);
 
         if (nativeButtons.length > 0 && mediaBuffer) {
-          try {
-            mainResult = await sendInteractiveMessageDirect(chatId, {
-              buffer: mediaBuffer, contentType: mediaContentType, mediaType: mType,
-              captionText, footerText: footer || '', nativeButtons
-            });
-            btnMethod = 'relay_interactive';
-          } catch (relayErr) {
-            console.error('[TemplatePro] relayMessage fallo:', relayErr.message);
-            try {
-              const payload = mType === 'video'
-                ? { video: mediaBuffer, caption: captionText, mimetype: mediaContentType, gifPlayback: false, interactiveButtons: nativeButtons }
-                : { image: mediaBuffer, caption: captionText, mimetype: mediaContentType, interactiveButtons: nativeButtons };
-              mainResult = await sendMessage(chatId, payload);
-              btnMethod = 'sendmsg_interactive';
-            } catch (sendErr) {
-              const plainPayload = mType === 'video'
-                ? { video: mediaBuffer, caption: captionText, mimetype: mediaContentType, gifPlayback: false }
-                : { image: mediaBuffer, caption: captionText, mimetype: mediaContentType };
-              mainResult = await sendMessage(chatId, plainPayload);
-              btnMethod = 'text_fallback';
-              if (buttons && buttons.length > 0) {
-                const btnText = buttons.map((b, i) => {
-                  const label = b.buttonText?.displayText || b.text || b.label || b.title || ('Opcion ' + (i + 1));
-                  const url = b.url || '';
-                  return url ? ('🔗 ' + label + ': ' + url) : ('▶ ' + label);
-                }).join('\n');
-                await sendMessage(chatId, { text: btnText + (footer ? '\n\n' + footer : '') }).catch(() => {});
+          // ── ANTI-BAN: proteger envío interactivo con media ──
+          const phoneForMeta = chatId.replace(/@s\.whatsapp\.net$/, '').replace(/[^0-9]/g, '');
+          const metaBtnLabels = nativeButtons.map(b => {
+            try { return JSON.parse(b.buttonParamsJson).display_text; } catch(x) { return 'Opción'; }
+          });
+          const safeResult = await safeSendInteractive(chatId, {
+            label: '[template_pro+media] ' + captionText.substring(0, 30),
+            sendFn: async () => {
+              try {
+                return await sendInteractiveMessageDirect(chatId, {
+                  buffer: mediaBuffer, contentType: mediaContentType, mediaType: mType,
+                  captionText, footerText: footer || '', nativeButtons
+                });
+              } catch (relayErr) {
+                console.error('[TemplatePro] relayMessage fallo:', relayErr.message);
+                const payload = mType === 'video'
+                  ? { video: mediaBuffer, caption: captionText, mimetype: mediaContentType, gifPlayback: false, interactiveButtons: nativeButtons }
+                  : { image: mediaBuffer, caption: captionText, mimetype: mediaContentType, interactiveButtons: nativeButtons };
+                return await sendMessage(chatId, payload);
               }
-            }
+            },
+            metaFallbackFn: metaCloudEnabled() ? async () => {
+              // Cloud API: enviar imagen + botones separados
+              if (mediaUrl) await sendMetaImage(phoneForMeta, { imageUrl: mediaUrl, caption: captionText });
+              return await sendMetaButtons(phoneForMeta, {
+                body: mediaUrl ? '↑ Ver imagen' : captionText,
+                footer: footer || '',
+                buttons: metaBtnLabels.map((l, i) => ({ id: 'btn_' + i, text: l }))
+              });
+            } : null
+          });
+          mainResult = safeResult.result;
+          btnMethod = safeResult.method === 'meta' ? 'meta_cloud_antiban' : 'relay_interactive';
+          if (safeResult.method === 'blocked') {
+            // Fallback a texto plano si todo está bloqueado
+            const plainPayload = mType === 'video'
+              ? { video: mediaBuffer, caption: captionText, mimetype: mediaContentType, gifPlayback: false }
+              : { image: mediaBuffer, caption: captionText, mimetype: mediaContentType };
+            mainResult = await sendMessage(chatId, plainPayload);
+            btnMethod = 'text_fallback_antiban';
           }
         } else if (mediaBuffer) {
           const payload = mType === 'video'
@@ -544,29 +802,48 @@ router.post('/chats/:chatId/send', async (req, res) => {
         }
       } else if (nativeButtons.length > 0) {
         textForLog = '[btn] ' + captionText.substring(0, 50);
-        try {
-          mainResult = await sendInteractiveMessageDirect(chatId, {
-            buffer: null, captionText, footerText: footer || '', nativeButtons
-          });
-          btnMethod = 'relay_interactive';
-          console.log('[SBI-server] relay_interactive OK:', captionText.substring(0, 40));
-        } catch (e) {
-          console.warn('[SBI-server] relay_interactive falló:', e.message, '- intentando sendmsg_interactive');
-          try {
-            mainResult = await sendMessage(chatId, { text: captionText, footer: footer || '', interactiveButtons: nativeButtons });
-            btnMethod = 'sendmsg_interactive';
-            console.log('[SBI-server] sendmsg_interactive OK');
-          } catch (e2) {
-            console.warn('[SBI-server] sendmsg_interactive falló:', e2.message, '- intentando legacy buttons');
-            const legacyBtnsT = nativeButtons.map((b, i) => {
-              let label = b.buttonParamsJson ? (() => { try { return JSON.parse(b.buttonParamsJson).display_text; } catch(x) { return null; } })() : null;
-              label = label || ('Opcion ' + (i + 1));
-              return { buttonId: b.id || String(i), buttonText: { displayText: label }, type: 1 };
+        // ── ANTI-BAN: proteger envío de solo botones ──
+        const phoneForMetaBtn = chatId.replace(/@s\.whatsapp\.net$/, '').replace(/[^0-9]/g, '');
+        const metaBtnLabels2 = nativeButtons.map(b => {
+          try { return JSON.parse(b.buttonParamsJson).display_text; } catch(x) { return 'Opción'; }
+        });
+        const safeResult2 = await safeSendInteractive(chatId, {
+          label: '[template_pro+btn] ' + captionText.substring(0, 30),
+          sendFn: async () => {
+            try {
+              const r = await sendInteractiveMessageDirect(chatId, {
+                buffer: null, captionText, footerText: footer || '', nativeButtons
+              });
+              console.log('[SBI-server] relay_interactive OK:', captionText.substring(0, 40));
+              return r;
+            } catch (e) {
+              console.warn('[SBI-server] relay falló:', e.message, '— sendmsg_interactive');
+              try {
+                return await sendMessage(chatId, { text: captionText, footer: footer || '', interactiveButtons: nativeButtons });
+              } catch (e2) {
+                console.warn('[SBI-server] sendmsg falló:', e2.message, '— legacy buttons');
+                const legacyBtnsT = nativeButtons.map((b, i) => {
+                  let label = b.buttonParamsJson ? (() => { try { return JSON.parse(b.buttonParamsJson).display_text; } catch(x) { return null; } })() : null;
+                  label = label || ('Opcion ' + (i + 1));
+                  return { buttonId: b.id || String(i), buttonText: { displayText: label }, type: 1 };
+                });
+                return await sendMessage(chatId, { text: captionText, buttons: legacyBtnsT, headerType: 1 });
+              }
+            }
+          },
+          metaFallbackFn: metaCloudEnabled() ? async () => {
+            return await sendMetaButtons(phoneForMetaBtn, {
+              body: captionText, footer: footer || '',
+              buttons: metaBtnLabels2.map((l, i) => ({ id: 'btn_' + i, text: l }))
             });
-            mainResult = await sendMessage(chatId, { text: captionText, buttons: legacyBtnsT, headerType: 1 });
-            btnMethod = 'legacy_buttons';
-            console.log('[SBI-server] legacy_buttons OK');
-          }
+          } : null
+        });
+        mainResult = safeResult2.result;
+        btnMethod = safeResult2.method === 'meta' ? 'meta_cloud_antiban' : 'relay_interactive';
+        if (safeResult2.method === 'blocked') {
+          // Texto plano como último recurso
+          mainResult = await sendMessage(chatId, { text: captionText });
+          btnMethod = 'text_fallback_antiban';
         }
       } else {
         mainResult = await sendMessage(chatId, { text: typeof message === 'string' ? message : '' });
@@ -680,10 +957,8 @@ router.post('/chats/:chatId/send', async (req, res) => {
       }
       if (menuFooter) menuText += `\n\n${menuFooter}`;
 
-      const jidMenu = chatId.includes('@') ? chatId : chatId + '@s.whatsapp.net';
-      const sockMenu = getSocket();
-      if (!sockMenu) return res.status(503).json({ error: 'Bot no conectado' });
-      const menuResult = await sockMenu.sendMessage(jidMenu, { text: menuText.trim() });
+      // ── ANTI-BAN: menú pasa por sendMessage (rate-limited) en vez de sock.sendMessage directo ──
+      const menuResult = await sendMessage(chatId, { text: menuText.trim() });
       const menuMsgId = menuResult?.key?.id;
       const storageJidMn = normalizeStorageJid(chatId);
       const chatNameMn = getContactName(chatId) || storageJidMn.split('@')[0];
@@ -696,10 +971,8 @@ router.post('/chats/:chatId/send', async (req, res) => {
       const pollQuestion = caption || (typeof message === 'string' ? message : '');
       const pollOptions = (buttons || []).map(b => b.buttonText?.displayText || b.text || b.label || b.title).filter(Boolean);
       const selectableCount = req.body.selectableCount || 1;
-      const jidPoll = chatId.includes('@') ? chatId : chatId + '@s.whatsapp.net';
-      const sockPoll = getSocket();
-      if (!sockPoll) return res.status(503).json({ error: 'Bot no conectado' });
-      const pollResult = await sockPoll.sendMessage(jidPoll, {
+      // ── ANTI-BAN: poll pasa por sendMessage (rate-limited) en vez de sock.sendMessage directo ──
+      const pollResult = await sendMessage(chatId, {
         poll: { name: pollQuestion, values: pollOptions, selectableCount }
       });
       const pollMsgId = pollResult?.key?.id;
@@ -1062,14 +1335,18 @@ router.post('/webhook', async (req, res) => {
 
           if (sse) {
             sse.broadcast({
-              type: 'new_message',
-              chatId: from, messageId: msgId, text,
-              direction: 'incoming', timestamp: ts,
-              contactName, source: 'meta_cloud'
+              type: 'message',
+              data: { chatId: from, messageId: msgId, pushName: contactName, senderName: contactName, text, messageType: msgType, fromMe: false, isGroup: false, timestamp: ts, source: 'meta_cloud' }
             });
           }
 
           console.log(`[Webhook Meta] Mensaje de ${from} (${msgType}): ${text.substring(0, 60)}`);
+
+          // Trigger auto-reply via Cloud API channel
+          if (text && msg.type !== 'reaction') {
+            handleIncomingMessage(from, text, contactName, msgId, { channel: 'meta', messageType: msgType })
+              .catch(err => console.error('[Webhook Meta] Auto-reply error:', err.message));
+          }
         }
       }
     }
@@ -1081,6 +1358,86 @@ router.post('/webhook', async (req, res) => {
 router.post('/disconnect', async (req, res) => {
   try { await disconnect(); res.json({ success: true, message: 'Desconectado' }); }
   catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+router.get('/debug-flags', (req, res) => {
+  try { res.json(getDebugFlags()); }
+  catch (err) { res.json({ error: err.message }); }
+});
+
+router.post('/connect', async (req, res) => {
+  try {
+    // force=true permite reconectar después de desvinculación intencional
+    // Solo el click explícito del botón "Conectar" del panel debe enviar force=true
+    const force = req.body?.force === true || req.query?.force === 'true';
+    const result = await startConnection({ force });
+    if (result && result.blocked) {
+      return res.json({ success: false, blocked: true, reason: result.reason, message: 'Conexion bloqueada: ' + result.reason });
+    }
+    res.json({ success: true, message: 'Conexion iniciada - esperando QR' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+/* ── FIX 100: Block / Unblock contact ─────────────────────── */
+router.post('/block', async (req, res) => {
+  try {
+    const { phone, action } = req.body; // action = 'block' | 'unblock'
+    if (!phone) return res.status(400).json({ error: 'phone requerido' });
+    const jid = phone.replace(/[^0-9]/g, '') + '@s.whatsapp.net';
+    const sock = getSocket();
+    if (!sock) return res.status(503).json({ error: 'WhatsApp no conectado' });
+    const blockAction = action === 'unblock' ? 'unblock' : 'block';
+    await sock.updateBlockStatus(jid, blockAction);
+    // Also update Supabase if available
+    const supabase = req.app.get('supabase');
+    if (supabase) {
+      await supabase.from('oasis_wa_chats')
+        .update({ blocked: blockAction === 'block', archived: true })
+        .eq('phone', phone.replace(/[^0-9]/g, ''));
+    }
+    res.json({ success: true, jid, action: blockAction });
+  } catch (err) {
+    console.error('[BLOCK]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/* ── FIX 100: Archive chat via API ─────────────────────────── */
+router.post('/archive', async (req, res) => {
+  try {
+    const { phone } = req.body;
+    if (!phone) return res.status(400).json({ error: 'phone requerido' });
+    const cleanPhone = phone.replace(/[^0-9]/g, '');
+    const supabase = req.app.get('supabase');
+    if (!supabase) return res.status(503).json({ error: 'Supabase no configurado' });
+    const { error } = await supabase.from('oasis_wa_chats')
+      .update({ archived: true })
+      .eq('phone', cleanPhone);
+    if (error) throw error;
+    res.json({ success: true, phone: cleanPhone, action: 'archived' });
+  } catch (err) {
+    console.error('[ARCHIVE]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/* ── FIX 100: Delete chat from Supabase ───────────────────── */
+router.post('/delete-chat', async (req, res) => {
+  try {
+    const { phone } = req.body;
+    if (!phone) return res.status(400).json({ error: 'phone requerido' });
+    const cleanPhone = phone.replace(/[^0-9]/g, '');
+    const supabase = req.app.get('supabase');
+    if (!supabase) return res.status(503).json({ error: 'Supabase no configurado' });
+    // Delete messages first, then chat
+    await supabase.from('oasis_wa_messages').delete().eq('chat_phone', cleanPhone);
+    const { error } = await supabase.from('oasis_wa_chats').delete().eq('phone', cleanPhone);
+    if (error) throw error;
+    res.json({ success: true, phone: cleanPhone, action: 'deleted' });
+  } catch (err) {
+    console.error('[DELETE-CHAT]', err.message);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 router.get('/settings', (req, res) => {
@@ -1181,6 +1538,59 @@ router.post('/ai-config', (req, res) => {
 router.get('/ai-usage', (req, res) => {
   try { res.json(getUsageStats()); }
   catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// =============================================
+// GET /warmup-stats — Estadísticas de calentamiento del número
+// =============================================
+router.get('/warmup-stats', async (req, res) => {
+  try {
+    const antiban = getAntiBan();
+    let warmupData = { day: 0, score: 0, risk: 'unknown', dailySent: 0, dailyLimit: 800 };
+
+    if (antiban && antiban.getStats) {
+      const stats = antiban.getStats();
+      warmupData.day = stats.warmUp?.day || 0;
+      warmupData.score = stats.health?.score || 0;
+      warmupData.risk = stats.health?.risk || 'unknown';
+      warmupData.dailySent = stats.counters?.today || 0;
+      warmupData.dailyLimit = stats.warmUp?.currentDayLimit || 800;
+      warmupData.perMinute = stats.counters?.perMinute || 0;
+      warmupData.perHour = stats.counters?.perHour || 0;
+    }
+
+    // Calcular score de calentamiento (0-100%)
+    // Factores: días activos (max 14), mensajes enviados, ratio respuestas
+    const dayScore = Math.min(warmupData.day / 14, 1) * 40; // 40% del score
+    const usageScore = warmupData.dailySent > 0 ? Math.min(warmupData.dailySent / 100, 1) * 30 : 0; // 30%
+    const healthScore = warmupData.risk === 'low' ? 30 : warmupData.risk === 'medium' ? 15 : warmupData.risk === 'high' ? 0 : 10; // 30%
+    warmupData.warmthPercent = Math.round(dayScore + usageScore + healthScore);
+
+    // Recomendaciones basadas en el estado
+    if (warmupData.day < 3) {
+      warmupData.recommendation = 'Número muy nuevo. Solo responder mensajes entrantes. NO hacer difusiones.';
+      warmupData.canBroadcast = false;
+    } else if (warmupData.day < 7) {
+      warmupData.recommendation = 'Período de calentamiento. Máximo 20-50 mensajes/día. Difusiones pequeñas (<10 contactos).';
+      warmupData.canBroadcast = false;
+    } else if (warmupData.day < 14) {
+      warmupData.recommendation = 'Número calentando bien. Puedes hacer difusiones pequeñas (10-30 contactos) con intervalos de 30+ min.';
+      warmupData.canBroadcast = true;
+      warmupData.maxBroadcast = 30;
+    } else {
+      warmupData.recommendation = 'Número maduro. Difusiones normales permitidas. Respetar límites anti-ban.';
+      warmupData.canBroadcast = true;
+      warmupData.maxBroadcast = Math.min(200, warmupData.dailyLimit - warmupData.dailySent);
+    }
+
+    // Estado de conexión
+    warmupData.connected = getConnectionState() === 'connected';
+    warmupData.uptime = Math.floor(process.uptime());
+
+    res.json(warmupData);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 // =============================================
 // GET /templates — Lee plantillas desde Supabase
@@ -1673,13 +2083,100 @@ router.post('/send-catalogo', async (req, res) => {
 });
 
 
+// POST /send-interactive — Enviar mensaje interactivo con botones/listas via baileys_helper
+router.post('/send-interactive', async (req, res) => {
+  try {
+    const { to, text, footer, buttons, type } = req.body;
+    if (!to) return res.status(400).json({ error: 'Falta "to" (número de teléfono)' });
+    const cleanTo = to.replace(/[^0-9]/g, '');
+    const jid = cleanTo + '@s.whatsapp.net';
+    const sock = getSocket();
+    if (!sock) return res.status(503).json({ error: 'Socket no disponible' });
+
+    const helper = getBaileysHelper();
+    if (!helper.sendInteractiveMessage) {
+      return res.status(503).json({ error: 'baileys_helper no disponible — instalar baileys_helpers' });
+    }
+
+    let interactiveButtons = [];
+
+    if (type === 'list' && req.body.sections) {
+      // Lista tipo single_select
+      interactiveButtons = [{
+        name: 'single_select',
+        buttonParamsJson: JSON.stringify({
+          title: req.body.buttonText || 'Ver opciones',
+          sections: req.body.sections
+        })
+      }];
+    } else if (buttons && Array.isArray(buttons)) {
+      // Botones: soporta formato simple {id, text} y avanzado {name, buttonParamsJson}
+      interactiveButtons = buttons.map(btn => {
+        if (btn.name && btn.buttonParamsJson) return btn;
+        if (btn.id && btn.text) {
+          return { name: 'quick_reply', buttonParamsJson: JSON.stringify({ display_text: btn.text, id: btn.id }) };
+        }
+        if (btn.url) {
+          return { name: 'cta_url', buttonParamsJson: JSON.stringify({ display_text: btn.text || btn.label || 'Abrir', url: btn.url }) };
+        }
+        if (btn.call || btn.phone) {
+          return { name: 'cta_call', buttonParamsJson: JSON.stringify({ display_text: btn.text || 'Llamar', phone_number: btn.call || btn.phone }) };
+        }
+        if (btn.copy) {
+          return { name: 'cta_copy', buttonParamsJson: JSON.stringify({ display_text: btn.text || 'Copiar', copy_code: btn.copy }) };
+        }
+        return { name: 'quick_reply', buttonParamsJson: JSON.stringify({ display_text: btn.text || btn.label || 'Opción', id: btn.id || 'btn_' + Math.random().toString(36).slice(2,6) }) };
+      });
+    }
+
+    if (interactiveButtons.length === 0) {
+      return res.status(400).json({ error: 'No se encontraron botones válidos' });
+    }
+
+    console.log('[send-interactive] Enviando a:', jid, '| botones:', interactiveButtons.length, '| texto:', (text || '').substring(0, 50));
+
+    // ── ANTI-BAN: proteger envío interactivo directo con todas las capas ──
+    const btnLabelsForMeta = interactiveButtons.filter(b => b.name === 'quick_reply').map(b => {
+      try { return JSON.parse(b.buttonParamsJson).display_text; } catch(x) { return 'Opción'; }
+    });
+    const safeInteractive = await safeSendInteractive(jid, {
+      label: '[send-interactive] ' + (text || '').substring(0, 30),
+      sendFn: async () => {
+        return await helper.sendInteractiveMessage(sock, jid, {
+          text: text || '', footer: footer || '', interactiveButtons
+        });
+      },
+      metaFallbackFn: (metaCloudEnabled() && btnLabelsForMeta.length > 0) ? async () => {
+        return await sendMetaButtons(cleanTo, {
+          body: text || '', footer: footer || '',
+          buttons: btnLabelsForMeta.map((l, i) => ({ id: 'btn_' + i, text: l }))
+        });
+      } : null
+    });
+
+    const result = safeInteractive.result;
+    const msgId = result?.key?.id;
+    console.log('[send-interactive] OK msgId:', msgId, '| method:', safeInteractive.method);
+
+    // Guardar en historial
+    const chatName = getContactName(cleanTo) || cleanTo;
+    saveMessage(cleanTo, chatName, { messageId: msgId, fromMe: true, text: '[interactive] ' + (text || '').substring(0, 50), type: 'interactive', timestamp: Date.now() }).catch(() => {});
+    upsertChat(cleanTo, chatName, '[interactive] ' + (text || '').substring(0, 50), Date.now()).catch(() => {});
+
+    res.json({ ok: true, messageId: msgId, method: safeInteractive.method, buttonsCount: interactiveButtons.length, antiban: safeInteractive.antiban });
+  } catch (e) {
+    console.error('[send-interactive] Error:', e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 // POST /trigger-reply — Bot forzado a responder al último mensaje del cliente
 router.post('/trigger-reply', async (req, res) => {
   try {
-    const { jid, messageText, pushName } = req.body;
+    const { jid, messageText, pushName, isAudioMessage } = req.body;
     if (!jid || !messageText) return res.status(400).json({ error: 'jid y messageText requeridos' });
     const msgId = 'trigger-' + Date.now();
-    handleIncomingMessage(jid, messageText, pushName || 'Cliente', msgId)
+    handleIncomingMessage(jid, messageText, pushName || 'Cliente', msgId, { isAudioMessage: !!isAudioMessage })
       .catch(e => console.error('[trigger-reply] error:', e.message));
     res.json({ ok: true, jid, msgId });
   } catch(e) {
@@ -1736,6 +2233,19 @@ router.post('/audio-settings', async (req, res) => {
   }
 });
 
+// POST /voice-preview — Generate a TTS preview (returns base64 audio, does NOT send via WhatsApp)
+router.post('/voice-preview', async (req, res) => {
+  try {
+    const { voice } = req.body;
+    if (!voice) return res.status(400).json({ ok: false, error: 'voice parameter required' });
+    const result = await generateVoicePreview(voice);
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    console.error('[voice-preview] Error:', err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // POST /audio-test — Envía un audio de prueba al número configurado via WhatsApp
 router.post('/audio-test', async (req, res) => {
   try {
@@ -1748,4 +2258,341 @@ router.post('/audio-test', async (req, res) => {
     const result = await sendAudioTest(targetJid, text);
     res.json({ ok: true, ...result, target: targetJid });
   } catch (err) {
-    console.error('[audio-test] Error:', err
+    console.error('[audio-test] Error:', err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// POST /test-transfer — Envía una transferencia de prueba al receptor configurado
+router.post('/test-transfer', async (req, res) => {
+  try {
+    const sock = getSocket();
+    if (!sock) return res.status(503).json({ ok: false, error: 'WhatsApp no conectado' });
+
+    const sb = getSupabase();
+    if (!sb) return res.status(503).json({ ok: false, error: 'Supabase no inicializado' });
+    const { data: cfgRows, error: cfgErr } = await sb
+      .from('oasis_wa_config')
+      .select('transfer_wa_receptor, transfer_enabled')
+      .eq('id', 'default')
+      .limit(1);
+    if (cfgErr) throw new Error('Error leyendo config: ' + cfgErr.message);
+    const cfg = cfgRows && cfgRows[0];
+    if (!cfg || !cfg.transfer_wa_receptor) return res.status(400).json({ ok: false, error: 'No hay receptor configurado' });
+
+    const receptorNum = cfg.transfer_wa_receptor.replace(/\D/g, '');
+    const rJid = receptorNum + '@s.whatsapp.net';
+
+    // 1. INSERT test transfer into DB so buttons can find it
+    const testOrder = '1x Combo Sánate Premium + 2x Jabón Cúrcuma';
+    const testTotal = 185000;
+    const { data: inserted, error: insertErr } = await sb
+      .from('oasis_wa_transfers')
+      .insert({
+        chat_jid: rJid,
+        phone: '3001234567',
+        push_name: 'Cliente Test',
+        image_url: 'https://sanate.store/logo.png',
+        order_summary: testOrder,
+        total: testTotal,
+        payment_method: 'Bancolombia',
+        status: 'pending'
+      })
+      .select('id')
+      .single();
+    if (insertErr) throw new Error('Error insertando test transfer: ' + insertErr.message);
+    const transferId = inserted.id;
+    console.log('[test-transfer] DB record created, id:', transferId);
+
+    // 2. Download test image
+    let imgBuffer = null;
+    const testImageUrl = 'https://sanate.store/logo.png';
+    try {
+      const dl = await downloadMediaBuffer(testImageUrl);
+      imgBuffer = dl.buffer;
+    } catch (imgErr) {
+      console.error('[test-transfer] Error descargando imagen:', imgErr.message);
+    }
+
+    // 3. Build review text + buttons
+    const reviewText =
+      '🔔 NUEVO PANTALLAZO DE PAGO\n\n' +
+      '👤 Cliente: Cliente Test (3001234567)\n' +
+      '📋 Pedido: ' + testOrder + '\n' +
+      '💰 Total: $' + testTotal.toLocaleString('es-CO') + '\n' +
+      '🏦 Método: Bancolombia\n\n' +
+      '⚠️ ESTO ES UNA PRUEBA desde el panel';
+
+    const nativeButtons = [
+      { name: 'quick_reply', buttonParamsJson: JSON.stringify({ display_text: '✅ Confirmado', id: 'transfer_approve_' + transferId }) },
+      { name: 'quick_reply', buttonParamsJson: JSON.stringify({ display_text: '⚠️ Posible estafa', id: 'transfer_fraud_' + transferId }) },
+      { name: 'quick_reply', buttonParamsJson: JSON.stringify({ display_text: '🚫 Bloquear', id: 'transfer_block_' + transferId }) }
+    ];
+
+    // 4. Send SINGLE message: image header + text + buttons
+    let buttonsSent = false;
+    try {
+      await sendInteractiveMessageDirect(rJid, {
+        buffer: imgBuffer,
+        contentType: 'image/png',
+        mediaType: 'image',
+        captionText: reviewText,
+        footerText: 'Sánate Bot • Verificación de pago',
+        nativeButtons: nativeButtons
+      });
+      buttonsSent = true;
+      console.log('[test-transfer] Mensaje con imagen+botones enviado OK');
+    } catch (btnErr) {
+      console.error('[test-transfer] Error enviando imagen+botones:', btnErr.message);
+      // Fallback: try buttons without image
+      try {
+        await sendInteractiveMessageDirect(rJid, {
+          captionText: reviewText,
+          footerText: 'Sánate Bot • Verificación de pago',
+          nativeButtons: nativeButtons
+        });
+        buttonsSent = true;
+        console.log('[test-transfer] Botones sin imagen enviados OK');
+      } catch (btnErr2) {
+        console.error('[test-transfer] Error enviando botones:', btnErr2.message);
+      }
+    }
+
+    // Fallback texto si botones fallan
+    if (!buttonsSent) {
+      if (imgBuffer) {
+        await sock.sendMessage(rJid, { image: imgBuffer, caption: 'Comprobante de Cliente Test (3001234567)', mimetype: 'image/png' });
+      }
+      const fallback = reviewText + '\n\nResponde con el número:\n1️⃣ Confirmado\n2️⃣ Posible estafa\n3️⃣ Bloquear';
+      await sock.sendMessage(rJid, { text: fallback });
+    }
+
+    res.json({ ok: true, buttonsSent, receptor: receptorNum, transferId });
+  } catch (err) {
+    console.error('[test-transfer] Error:', err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// =============================================
+// SCHEDULE / HORARIOS — Horario de operación del bot
+// =============================================
+
+const DEFAULT_SCHEDULE = {
+  enabled: false,
+  timezone: 'America/Bogota',
+  days: {
+    mon: { active: true, start: '08:00', end: '18:00' },
+    tue: { active: true, start: '08:00', end: '18:00' },
+    wed: { active: true, start: '08:00', end: '18:00' },
+    thu: { active: true, start: '08:00', end: '18:00' },
+    fri: { active: true, start: '08:00', end: '18:00' },
+    sat: { active: true, start: '09:00', end: '14:00' },
+    sun: { active: false, start: '00:00', end: '00:00' }
+  }
+};
+
+// GET /schedule — Returns current bot schedule
+router.get('/schedule', async (req, res) => {
+  try {
+    const supabase = req.app.get('supabase');
+    if (!supabase) return res.json(DEFAULT_SCHEDULE);
+    const { data, error } = await supabase
+      .from('oasis_wa_config')
+      .select('system_prompt')
+      .eq('id', 'bot_schedule')
+      .single();
+    if (error || !data || !data.system_prompt) return res.json(DEFAULT_SCHEDULE);
+    const schedule = JSON.parse(data.system_prompt);
+    res.json(schedule);
+  } catch (err) {
+    console.error('[schedule GET]', err.message);
+    res.json(DEFAULT_SCHEDULE);
+  }
+});
+
+// POST /schedule — Saves schedule config
+router.post('/schedule', async (req, res) => {
+  try {
+    const supabase = req.app.get('supabase');
+    if (!supabase) return res.status(503).json({ error: 'Supabase no disponible' });
+    const schedule = req.body;
+    if (!schedule || typeof schedule !== 'object') {
+      return res.status(400).json({ error: 'Se esperaba un objeto de horario válido' });
+    }
+    const { error } = await supabase
+      .from('oasis_wa_config')
+      .upsert({ id: 'bot_schedule', system_prompt: JSON.stringify(schedule) });
+    if (error) throw error;
+    invalidateScheduleCache(); // Force reload on next message check
+    console.log('[schedule POST] Horario guardado:', schedule.enabled ? 'ACTIVO' : 'DESACTIVADO');
+    res.json({ ok: true, schedule });
+  } catch (err) {
+    console.error('[schedule POST]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// =============================================
+// BACKUP — Snapshots de datos al cambiar de número
+// =============================================
+
+// POST /backup/create — Create backup snapshot when WhatsApp disconnects
+router.post('/backup/create', async (req, res) => {
+  try {
+    const supabase = req.app.get('supabase');
+    if (!supabase) return res.status(503).json({ error: 'Supabase no disponible' });
+
+    // Get connected phone number
+    const sock = getSocket();
+    const rawPhoneId = sock?.user?.id || '';
+    const phoneNumber = rawPhoneId.replace(/:.*$/, '').replace(/@s\.whatsapp\.net$/, '').replace(/[^0-9]/g, '');
+    if (!phoneNumber) return res.status(400).json({ error: 'No hay número de teléfono conectado' });
+
+    // Count chats
+    const { count: chatsCount, error: chatsErr } = await supabase
+      .from('oasis_wa_chats')
+      .select('*', { count: 'exact', head: true });
+    if (chatsErr) throw chatsErr;
+
+    // Count messages
+    const { count: messagesCount, error: msgsErr } = await supabase
+      .from('oasis_wa_messages')
+      .select('*', { count: 'exact', head: true });
+    if (msgsErr) throw msgsErr;
+
+    // Create backup record
+    const { data: backup, error: backupErr } = await supabase
+      .from('oasis_wa_backups')
+      .insert({
+        phone_number: phoneNumber,
+        backup_date: new Date().toISOString(),
+        chats_count: chatsCount || 0,
+        messages_count: messagesCount || 0,
+        status: 'active'
+      })
+      .select()
+      .single();
+    if (backupErr) throw backupErr;
+
+    // Tag all existing chats with this phone number
+    const { error: tagChatsErr } = await supabase
+      .from('oasis_wa_chats')
+      .update({ phone_number: phoneNumber })
+      .is('phone_number', null);
+    if (tagChatsErr) console.error('[backup] Error tagging chats:', tagChatsErr.message);
+
+    // Tag all existing messages with this phone number
+    const { error: tagMsgsErr } = await supabase
+      .from('oasis_wa_messages')
+      .update({ phone_number: phoneNumber })
+      .is('phone_number', null);
+    if (tagMsgsErr) console.error('[backup] Error tagging messages:', tagMsgsErr.message);
+
+    console.log(`[backup] Created backup for ${phoneNumber}: ${chatsCount} chats, ${messagesCount} messages`);
+    res.json({
+      ok: true,
+      backup: {
+        id: backup.id,
+        phone_number: phoneNumber,
+        chats_count: chatsCount || 0,
+        messages_count: messagesCount || 0,
+        backup_date: backup.backup_date
+      }
+    });
+  } catch (err) {
+    console.error('[backup/create]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /backup/list — Returns all backups
+router.get('/backup/list', async (req, res) => {
+  try {
+    const supabase = req.app.get('supabase');
+    if (!supabase) return res.status(503).json({ error: 'Supabase no disponible' });
+    const { data, error } = await supabase
+      .from('oasis_wa_backups')
+      .select('*')
+      .order('backup_date', { ascending: false });
+    if (error) throw error;
+    res.json({ ok: true, backups: data || [] });
+  } catch (err) {
+    console.error('[backup/list]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /backup/restore/:phone — Restores data filter for a specific phone number
+router.post('/backup/restore/:phone', async (req, res) => {
+  try {
+    const supabase = req.app.get('supabase');
+    if (!supabase) return res.status(503).json({ error: 'Supabase no disponible' });
+    const phone = req.params.phone.replace(/[^0-9]/g, '');
+    if (!phone) return res.status(400).json({ error: 'Número de teléfono inválido' });
+
+    // Set active phone filter in config
+    const { error } = await supabase
+      .from('oasis_wa_config')
+      .upsert({
+        id: 'active_phone',
+        system_prompt: JSON.stringify({ phone, hidden: false, restored_at: new Date().toISOString() })
+      });
+    if (error) throw error;
+
+    console.log(`[backup/restore] Active phone set to: ${phone}`);
+    res.json({ ok: true, activePhone: phone });
+  } catch (err) {
+    console.error('[backup/restore]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /backup/hide — Hides all data (for switching numbers)
+router.post('/backup/hide', async (req, res) => {
+  try {
+    const supabase = req.app.get('supabase');
+    if (!supabase) return res.status(503).json({ error: 'Supabase no disponible' });
+
+    // Set hidden flag — panels will show empty state
+    const { error } = await supabase
+      .from('oasis_wa_config')
+      .upsert({
+        id: 'active_phone',
+        system_prompt: JSON.stringify({ phone: null, hidden: true, hidden_at: new Date().toISOString() })
+      });
+    if (error) throw error;
+
+    console.log('[backup/hide] All data hidden');
+    res.json({ ok: true, hidden: true });
+  } catch (err) {
+    console.error('[backup/hide]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /backup/active-phone — Returns the currently active phone number for filtering
+router.get('/backup/active-phone', async (req, res) => {
+  try {
+    const supabase = req.app.get('supabase');
+    if (!supabase) return res.json({ activePhone: null, hidden: false });
+    const { data, error } = await supabase
+      .from('oasis_wa_config')
+      .select('system_prompt')
+      .eq('id', 'active_phone')
+      .single();
+    if (error || !data || !data.system_prompt) return res.json({ activePhone: null, hidden: false });
+    const config = JSON.parse(data.system_prompt);
+    res.json({
+      activePhone: config.phone || null,
+      hidden: !!config.hidden,
+      restoredAt: config.restored_at || null,
+      hiddenAt: config.hidden_at || null
+    });
+  } catch (err) {
+    console.error('[backup/active-phone]', err.message);
+    res.json({ activePhone: null, hidden: false });
+  }
+});
+
+module.exports = router;

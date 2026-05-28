@@ -55,18 +55,34 @@
   // FIX v2.3: rastrear chats con mensajes nuevos sin confirmación de lectura
   const chatHasNewMsg     = new Set();  // chatIds con mensajes recién enviados
 
-  /* ── 3. SSE ────────────────────────────────────────────────────────── */
+  /* ── 3. SSE (backoff exponencial, max 5 reintentos) ─────────────── */
+  var _sseRetries = 0;
+  var _sseMaxRetries = 5;
+  var _sseCurrentES = null;
   function conectarSSE() {
+    if (_sseRetries >= _sseMaxRetries) {
+      console.warn('[Visual v2] SSE: max reintentos alcanzado, detenido');
+      return;
+    }
     try {
-      const es = new EventSource(BOT_SSE);
-      es.onmessage = (evt) => {
+      if (_sseCurrentES) { try { _sseCurrentES.close(); } catch(e){} }
+      var es = new EventSource(BOT_SSE);
+      _sseCurrentES = es;
+      es.onopen = function() { _sseRetries = 0; console.log('[Visual v2] SSE conectado'); };
+      es.onmessage = function(evt) {
         try { manejarEvento(JSON.parse(evt.data)); } catch (e) {}
       };
-      es.onerror = () => { es.close(); setTimeout(conectarSSE, 6000); };
-      console.log('[Sánate Visual v2] SSE conectado ✅');
+      es.onerror = function() {
+        es.close(); _sseCurrentES = null;
+        _sseRetries++;
+        var delay = Math.min(6000 * Math.pow(2, _sseRetries - 1), 60000);
+        console.log('[Visual v2] SSE reconectando en', delay/1000, 's (intento', _sseRetries + ')');
+        setTimeout(conectarSSE, delay);
+      };
     } catch (e) {
-      console.warn('[Sánate Visual v2] SSE error:', e.message);
-      setTimeout(conectarSSE, 8000);
+      console.warn('[Visual v2] SSE error:', e.message);
+      _sseRetries++;
+      setTimeout(conectarSSE, 15000);
     }
   }
 
