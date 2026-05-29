@@ -1069,7 +1069,8 @@ router.post('/chats/:chatId/send-media', async (req, res) => {
       msgContent = { image: mediaBuffer, mimetype: mime, caption: caption || '', fileName: fileName || 'imagen.jpg' };
     }
     
-    await sock.sendMessage(jid, msgContent);
+    // ── ANTI-BAN: usar sendMessage (rate-limited) en vez de sock.sendMessage directo ──
+    await sendMessage(jid, msgContent);
     res.json({ ok: true, type: isVideo ? 'video' : isAudio ? 'audio' : 'image' });
   } catch (err) {
     console.error('[send-media]', err.message);
@@ -2075,7 +2076,8 @@ router.post('/send-catalogo', async (req, res) => {
     const catalogUrl = `https://sanate-wa-bot.onrender.com/api/whatsapp/catalogo`;
     const msg = `🌿 *Catálogo Sánate Colombia*\n\nToca el botón aquí abajo para ver nuestro menú completo con opciones tapeables 👇\n\n${catalogUrl}\n\n_Abre el link y selecciona lo que te interesa_ ✨`;
 
-    await sock.sendMessage(jid, { text: msg });
+    // ── ANTI-BAN: usar sendMessage (rate-limited) ──
+    await sendMessage(jid, { text: msg });
     res.json({ ok: true, to: cleanTo, url: catalogUrl });
   } catch(e) {
     res.status(500).json({ ok: false, error: e.message });
@@ -2361,10 +2363,11 @@ router.post('/test-transfer', async (req, res) => {
     // Fallback texto si botones fallan
     if (!buttonsSent) {
       if (imgBuffer) {
-        await sock.sendMessage(rJid, { image: imgBuffer, caption: 'Comprobante de Cliente Test (3001234567)', mimetype: 'image/png' });
+        // ── ANTI-BAN: usar sendMessage (rate-limited) ──
+        await sendMessage(rJid, { image: imgBuffer, caption: 'Comprobante de Cliente Test (3001234567)', mimetype: 'image/png' });
       }
       const fallback = reviewText + '\n\nResponde con el número:\n1️⃣ Confirmado\n2️⃣ Posible estafa\n3️⃣ Bloquear';
-      await sock.sendMessage(rJid, { text: fallback });
+      await sendMessage(rJid, { text: fallback });
     }
 
     res.json({ ok: true, buttonsSent, receptor: receptorNum, transferId });

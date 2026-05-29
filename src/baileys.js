@@ -464,9 +464,10 @@ async function connectToWhatsApp() {
     },
     // Browser fingerprint PERSISTIDO: prioridad stealth module > fingerprint guardado
     browser: stealthConfig.browser || _selectedBrowser,
-    // WhatsApp Web real: marca online al conectar (tab activo)
-    // NOTA: false era sospechoso — WA Web real SÍ marca online cuando la pestaña está enfocada
-    markOnlineOnConnect: true,
+    // ── ANTI-BAN: NO marcar online automáticamente ──
+    // Mejor simular presencia manualmente con startPresenceSimulation()
+    // markOnlineOnConnect:true marca 24/7 online = patrón de bot detectable
+    markOnlineOnConnect: false,
     printQRInTerminal: true,
     // generateHighQualityLinkPreview genera tráfico extra detectable — desactivar
     generateHighQualityLinkPreview: false,
@@ -687,10 +688,18 @@ async function connectToWhatsApp() {
         }, 3000);
       } else {
         qrAttempts = 0;
-        console.log('[Reconnect] Reconectando en 5 segundos (reason=' + reason + ')...');
+        // ── ANTI-BAN: backoff exponencial con jitter en reconexiones ──
+        if (!global._reconnectCount) global._reconnectCount = 0;
+        global._reconnectCount++;
+        const backoffDelays = [5000, 10000, 20000, 40000, 60000, 120000];
+        const idx = Math.min(global._reconnectCount - 1, backoffDelays.length - 1);
+        const base = backoffDelays[idx];
+        const jitter = Math.floor(base * 0.3 * Math.random());
+        const delay = base + jitter;
+        console.log('[Reconnect] Backoff reconexión en ' + (delay/1000) + 's (intento ' + global._reconnectCount + ', reason=' + reason + ')...');
         connectionState = 'reconnecting';
         if (sseManager) sseManager.broadcast({ type: 'connection', data: { status: 'reconnecting', reason } });
-        safeReconnect(5000, 'Reconnect');
+        safeReconnect(delay, 'Reconnect');
       }
     }
 
@@ -698,6 +707,7 @@ async function connectToWhatsApp() {
       connectionState = 'connected';
       qrCode = null;
       qrAttempts = 0; // Reset QR counter on successful connection
+      global._reconnectCount = 0; // Reset backoff on successful connection
       console.log('WhatsApp CONECTADO' + (hasExistingSession ? ' (reconexion silenciosa - sin QR)' : ' (nueva sesion via QR)'));
       if (sseManager) sseManager.broadcast({ type: 'connection', data: { status: 'connected' } });
       // ── ANTI-BAN: notificar reconexión exitosa ──
