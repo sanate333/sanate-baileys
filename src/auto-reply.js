@@ -371,6 +371,21 @@ async function handleIncomingMessage(chatJid, messageText, pushName, messageId, 
     return;
   }
 
+  // ── PER-CONTACT IA CHECK: don't respond if ia_enabled is false for this contact ──
+  if (supabaseClient) {
+    try {
+      const { data: _iaRow } = await supabaseClient
+        .from('oasis_wa_chats')
+        .select('ia_enabled')
+        .eq('jid', chatJid)
+        .maybeSingle();
+      if (_iaRow && _iaRow.ia_enabled === false) {
+        console.log('[AI] IA disabled for', chatJid.split('@')[0], '— skipping');
+        return;
+      }
+    } catch(_iae) {}
+  }
+
   // ── ANTI-BAN: track incoming message for reply-ratio ──
   const _inPhone = chatJid.replace(/@s\.whatsapp\.net$/, '').replace(/[^0-9]/g, '');
   if (_inPhone.length >= 7) _trackReplyRatio(_inPhone, 'in');
