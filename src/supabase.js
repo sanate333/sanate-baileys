@@ -58,9 +58,7 @@ async function upsertChat(chatJid, chatName, lastMessage, lastTimestamp, source,
     const { data: existing } = await supabase.from('oasis_wa_chats').select('jid,push_name').eq('jid', chatJid).eq('store_id', sid).maybeSingle();
 
     if (!existing) {
-      /* ── ANTI-FLASH: Si la fuente es 'sync', NO crear chat nuevo — evita resucitar chats eliminados ── */
-      if (source === 'sync') return null;
-      /* Nuevo contacto (incoming/outgoing real): insertar con todos los campos */
+      /* Nuevo contacto: insertar con todos los campos */
       const row = {
         jid: chatJid, name: chatName || phone, phone: phone,
         push_name: chatName || null, last_message: lastMessage,
@@ -137,28 +135,21 @@ async function getMessages(chatJid, limit = 50, before = null, storeId) {
 
 async function syncInitialChats(chatsData, storeId) {
   if (!supabase) return { synced: 0, errors: 0 };
-  let synced = 0, errors = 0, skipped = 0;
+  let synced = 0, errors = 0;
   const sid = storeId || DEFAULT_STORE_ID;
-  console.log('[SYNC] Sincronizando ' + chatsData.length + ' chats (store: ' + sid.slice(0, 8) + ')...');
-
-  // ── ANTI-FLASH FIX: Get existing chats first — only sync those that already exist in DB ──
-  const { data: existingChats } = await supabase.from('oasis_wa_chats').select('jid').eq('store_id', sid);
-  const existingJids = new Set((existingChats || []).map(c => c.jid));
+  console.log('Sincronizando ' + chatsData.length + ' chats (store: ' + sid.slice(0, 8) + ')...');
 
   for (const chat of chatsData) {
     try {
-      // ── ANTI-FLASH: Skip chats not already in Supabase — prevents re-creation of deleted chats ──
-      const normalizedJid = chat.jid.includes('@') ? chat.jid.split('@')[0] : chat.jid;
-      if (!existingJids.has(chat.jid) && !existingJids.has(normalizedJid)) {
-        skipped++;
-        continue;
-      }
       await upsertChat(chat.jid, chat.name, chat.lastMessage, chat.lastTimestamp, 'sync', sid);
+      if (chat.messages && chat.messages.length > 0) {
+        for (const msg of chat.messages) { await saveMessage(chat.jid, chat.name, msg, sid); }
+      }
       synced++;
     } catch (err) { errors++; console.error('Error ' + chat.jid + ': ' + err.message); }
   }
-  console.log('[SYNC] Completado: ' + synced + ' actualizados, ' + skipped + ' omitidos (no existían), ' + errors + ' errores');
-  return { synced, errors, skipped };
+  console.log('[SYNC] Completado: ' + synced + ' OK, ' + errors + ' errores');
+  return { synced, errors };
 }
 
 async function updateMessageStatus(messageId, status) {
