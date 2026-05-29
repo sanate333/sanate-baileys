@@ -25,6 +25,20 @@ const PORT = process.env.PORT || 5055;
 let trackingCron = null;
 
 // === MIDDLEWARE ===
+// ── ANTI-BAN: API rate limiting to prevent abuse ──
+let rateLimit;
+try {
+  rateLimit = require('express-rate-limit');
+  // General API rate limit: 100 requests per minute
+  app.use('/api/', rateLimit({ windowMs: 60 * 1000, max: 100, message: { error: 'Rate limit exceeded. Try again in a minute.' } }));
+  // Stricter limit for send endpoints: 30 per minute
+  app.use('/api/whatsapp/send', rateLimit({ windowMs: 60 * 1000, max: 30, message: { error: 'Send rate limit. Slow down to avoid bans.' } }));
+  app.use('/api/whatsapp/chats/*/send', rateLimit({ windowMs: 60 * 1000, max: 30, message: { error: 'Send rate limit. Slow down to avoid bans.' } }));
+  console.log('[ANTI-BAN] Express rate limiting activo');
+} catch(e) {
+  console.warn('[ANTI-BAN] express-rate-limit no disponible:', e.message);
+}
+
 app.use(cors({
   origin: ['https://sanate.store', 'http://localhost:3000'],
   credentials: true

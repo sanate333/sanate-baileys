@@ -941,6 +941,10 @@ async function connectToWhatsApp() {
         }
         if (effectiveText) {
           // Use resolved phone JID for auto-reply (so responses go to phone, not @lid)
+          // ── ANTI-BAN: Mark message as read before replying (human behavior) ──
+          try { await sock.readMessages([msg.key]).catch(() => {}); } catch(e) {}
+          // ── ANTI-BAN: Small delay after reading, then start typing ──
+          await new Promise(r => setTimeout(r, 500 + Math.random() * 1500));
           try { sock.sendPresenceUpdate('composing', chatId).catch(() => {}); } catch(e) {}
           const audioDuration = messageType === 'audio'
             ? (msg.message?.audioMessage?.seconds || 0) : 0;
@@ -1187,9 +1191,20 @@ function getContactName(jid) {
   return contactCache.get(jid) || null;
 }
 
+// ── ANTI-BAN: Per-contact cooldown tracker ──
+const _contactLastSent = new Map();
+const CONTACT_COOLDOWN_MS = 3000; // Min 3s between messages to same contact
+
 async function sendMessage(chatId, content) {
   const storageId = normalizeJid(chatId);
   if (!sock || connectionState !== 'connected') throw new Error('WhatsApp no esta conectado');
+
+  // ── ANTI-BAN: Per-contact cooldown ──
+  const lastSent = _contactLastSent.get(storageId) || 0;
+  const elapsed = Date.now() - lastSent;
+  if (elapsed < CONTACT_COOLDOWN_MS) {
+    await new Promise(r => setTimeout(r, CONTACT_COOLDOWN_MS - elapsed + Math.random() * 1000));
+  }
   // Guard: never send blank/invisible-only text messages
   const _invisRe = /[\u200b\u200c\u200d\u200e\u200f\ufeff\u00ad\u2060\u180e\s]/g;
   if (typeof content === 'string' && !content.replace(_invisRe, '')) {
@@ -1203,6 +1218,7 @@ async function sendMessage(chatId, content) {
   const messagePayload = typeof content === 'string' ? { text: content } : content;
   const waJid = chatId.includes('@') ? chatId : chatId + '@s.whatsapp.net';
   const sent = await sock.sendMessage(waJid, messagePayload);
+  _contactLastSent.set(storageId, Date.now()); // ANTI-BAN: track last sent time
   const sentText = typeof content === 'string' ? content : (content.text || '[media]');
 
   await saveMessage(storageId, 'Sanate Bot', {
