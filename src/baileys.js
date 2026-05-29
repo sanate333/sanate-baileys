@@ -750,6 +750,12 @@ async function connectToWhatsApp() {
       console.log('[MSG] jid=' + rjid + ' fromMe=' + msg.key.fromMe + ' hasMsg=' + !!msg.message);
       if (isJidBroadcast(msg.key.remoteJid)) continue;
       if (msg.key.remoteJid === 'status@broadcast') continue;
+      // ── ANTI-FLASH: Skip messages older than 3 days — prevents old chats reappearing ──
+      const _msgTs = (msg.messageTimestamp || 0) * 1000;
+      if (_msgTs && _msgTs < Date.now() - 3 * 86400000) {
+        console.log('[SKIP-OLD] Ignoring old msg from', rjid.split('@')[0], 'ts:', new Date(_msgTs).toISOString());
+        continue;
+      }
       // NOTE: removed @lid filter — some real contacts use @lid JIDs in newer WA versions
 
       // Si msg.message es null: Bad MAC / sesion Signal corrupta.
