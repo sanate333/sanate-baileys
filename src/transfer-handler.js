@@ -35,6 +35,58 @@ const pendingTransfers = new Map();
 // Track last order context per chat so handleScreenshot can reference it
 const lastOrderContext = new Map();
 
+// ── ANTI-SPAM/BAN HARDENING (30 may 2026) ──
+const MAX_TRANSFERS_PER_CHAT_PER_DAY = 3;
+const RECEPTOR_COOLDOWN_MS = 8000;  // 8s entre mensajes al receptor (anti-spam)
+let _receptorLastSent = 0;
+
+async function waitForReceptorCooldown() {
+  const elapsed = Date.now() - _receptorLastSent;
+  if (elapsed < RECEPTOR_COOLDOWN_MS) {
+    const waitMs = RECEPTOR_COOLDOWN_MS - elapsed + Math.floor(Math.random() * 2000); // jitter ±2s
+    log('Receptor cooldown — esperando', waitMs, 'ms');
+    await new Promise(r => setTimeout(r, waitMs));
+  }
+}
+
+async function countTransfersToday(chatJid) {
+  try {
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const { count, error } = await supabase
+      .from('oasis_wa_transfers')
+      .select('id', { count: 'exact', head: true })
+      .eq('chat_jid', chatJid)
+      .gte('created_at', since);
+    if (error) { logErr('countTransfersToday:', error.message); return 0; }
+    return count || 0;
+  } catch (e) { logErr('countTransfersToday exception:', e.message); return 0; }
+}
+
+// Image validation: ask Gemini if it looks like a payment screenshot
+async function validatePaymentScreenshot(imageBuffer, hintMethod) {
+  try {
+    const autoReply = require('./auto-reply');
+    const cfg = autoReply.getConfig ? autoReply.getConfig() : {};
+    const key = cfg.geminiKey || process.env.GEMINI_API_KEY;
+    if (!key || !imageBuffer || imageBuffer.length < 200) return { ok: true, reason: 'no-validation-available' };
+    const b64 = imageBuffer.toString('base64');
+    const prompt = `Mira esta imagen. ¿Parece un pantallazo de transferencia bancaria, Nequi, Bancolombia, Daviplata o similar de pago en Colombia? Responde EXACTAMENTE una palabra: SI / NO / DUDA. Considera que el cliente dijo que pagó por: ${hintMethod || 'transferencia'}.`;
+    const resp = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=' + key, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }, { inline_data: { mime_type: 'image/jpeg', data: b64 } }] }],
+        generationConfig: { temperature: 0.0, maxOutputTokens: 5 }
+      })
+    });
+    if (!resp.ok) return { ok: true, reason: 'gemini-error-allow' };
+    const data = await resp.json();
+    const verdict = (data?.candidates?.[0]?.content?.parts?.[0]?.text || '').trim().toUpperCase();
+    log('Image validation verdict:', verdict);
+    if (verdict.startsWith('NO')) return { ok: false, reason: 'not-payment-screenshot' };
+    return { ok: true, reason: verdict };
+  } catch (e) { logErr('validatePaymentScreenshot:', e.message); return { ok: true, reason: 'exception-allow' }; }
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 function log(...args) { console.log('[Transfer]', ...args); }
@@ -150,6 +202,16 @@ async function handleScreenshot(chatJid, phone, pushName, mediaUrl, _imageAnalys
     const total = ctx.total || 0;
     const paymentMethod = ctx.paymentMethod || 'transferencia';
 
+    // 0. ANTI-SPAM CAP — máx 3 transfers por chat por día
+    const todayCount = await countTransfersToday(chatJid);
+    if (todayCount >= MAX_TRANSFERS_PER_CHAT_PER_DAY) {
+      log('Cliente excedió cap diario:', chatJid, todayCount);
+      try {
+        await sock.sendMessage(chatJid, { text: '⚠️ Ya recibimos varios pantallazos tuyos hoy. Por favor espera la revisión de los anteriores o contáctanos por DM si tienes dudas. Gracias!' });
+      } catch (e) {}
+      return;
+    }
+
     // 1. Insert transfer record
     const { data: inserted, error: insertErr } = await supabase
       .from('oasis_wa_transfers')
@@ -217,6 +279,26 @@ async function handleScreenshot(chatJid, phone, pushName, mediaUrl, _imageAnalys
       logErr('Error downloading image for header:', dlErr.message);
     }
 
+    // ANTI-SPAM: validate image is actually a payment screenshot before forwarding
+    if (imgBuffer) {
+      const validation = await validatePaymentScreenshot(imgBuffer, paymentMethod);
+      if (!validation.ok) {
+        log('Image validation REJECTED:', validation.reason);
+        try {
+          await sock.sendMessage(chatJid, { text: '🤔 La imagen que enviaste no parece un pantallazo de transferencia. Por favor envía la captura clara de tu pago bancario.' });
+        } catch (e) {}
+        // Mark this transfer as invalid in DB
+        try { await supabase.from('oasis_wa_transfers').update({ status: 'invalid_image' }).eq('id', transferId); } catch (e) {}
+        return;
+      }
+    }
+
+    // Anti-spam: wait for receptor cooldown + typing indicator (humanize)
+    await waitForReceptorCooldown();
+    try { await sock.sendPresenceUpdate('composing', rJid); } catch (e) {}
+    await new Promise(r => setTimeout(r, 1500 + Math.floor(Math.random() * 1500)));
+    try { await sock.sendPresenceUpdate('paused', rJid); } catch (e) {}
+
     let buttonsSent = false;
 
     // Try sending SINGLE message: image header + text + buttons via relay
@@ -257,20 +339,23 @@ async function handleScreenshot(chatJid, phone, pushName, mediaUrl, _imageAnalys
       ];
       if (!isGroup(rJid)) additionalNodes.push({ tag: 'bot', attrs: { biz_bot: '1' } });
       await sock.relayMessage(rJid, wamsg.message, { messageId: wamsg.key.id, additionalNodes });
+      _receptorLastSent = Date.now();
       buttonsSent = true;
       log('Single message (image+text+buttons) sent OK');
     } catch (btnErr) {
       logErr('Error sending combined message:', btnErr.message);
     }
 
-    // Fallback: send image separately + text with buttons
+    // Fallback: send ONE message — image with caption containing all info + instructions
     if (!buttonsSent) {
-      log('Fallback: sending image + text separately');
+      log('Fallback: sending consolidated image+caption');
+      const fallbackCaption = reviewText + '\n\nResponde con el número:\n1️⃣ Confirmado · 2️⃣ Posible estafa · 3️⃣ Bloquear';
       if (imgBuffer) {
-        await sock.sendMessage(rJid, { image: imgBuffer, caption: `Comprobante de ${pushName} (${phone})` });
+        await sock.sendMessage(rJid, { image: imgBuffer, caption: fallbackCaption });
+      } else {
+        await sock.sendMessage(rJid, { text: fallbackCaption });
       }
-      const fallback = reviewText + '\n\nResponde con el número:\n1️⃣ Confirmado\n2️⃣ Posible estafa\n3️⃣ Bloquear';
-      await sock.sendMessage(rJid, { text: fallback });
+      _receptorLastSent = Date.now();
     }
 
     log('Screenshot forwarded to receptor, transferId:', transferId);
