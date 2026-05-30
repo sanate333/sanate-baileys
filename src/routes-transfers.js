@@ -127,4 +127,44 @@ router.get('/transfers/engagement', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+
+router.get('/chats/export.csv', async (req, res) => {
+  try {
+    const supabase = getSupabase(req);
+    if (!supabase) return res.status(503).json({ error: 'Supabase no disponible' });
+    const days = Math.min(parseInt(req.query.days) || 30, 365);
+    const since = Math.floor((Date.now() - days * 24 * 60 * 60 * 1000) / 1000);
+    const { data, error } = await supabase
+      .from('oasis_wa_messages')
+      .select('id,chat_jid,chat_name,message_id,direction,content,media_type,timestamp')
+      .gte('timestamp', since)
+      .order('timestamp', { ascending: false })
+      .limit(5000);
+    if (error) throw error;
+    const headers = ['id','chat_jid','chat_name','message_id','direction','content','media_type','timestamp'];
+    const escapeCsv = v => {
+      if (v === null || v === undefined) return '';
+      const s = String(v).replace(/"/g, '""');
+      return /[",\n]/.test(s) ? '"' + s + '"' : s;
+    };
+    const csv = [headers.join(',')].concat((data || []).map(r => headers.map(h => escapeCsv(r[h])).join(','))).join('\n');
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="chats-${new Date().toISOString().slice(0,10)}.csv"`);
+    res.send(csv);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/chats/stats', async (req, res) => {
+  try {
+    const supabase = getSupabase(req);
+    if (!supabase) return res.status(503).json({ error: 'Supabase no disponible' });
+    const since24 = Math.floor((Date.now() - 24 * 60 * 60 * 1000) / 1000);
+    const since7d = Math.floor((Date.now() - 7 * 24 * 60 * 60 * 1000) / 1000);
+    const { count: chatsCount } = await supabase.from('oasis_wa_chats').select('id', { count: 'exact', head: true });
+    const { count: msgs24 } = await supabase.from('oasis_wa_messages').select('id', { count: 'exact', head: true }).gte('timestamp', since24);
+    const { count: msgs7d } = await supabase.from('oasis_wa_messages').select('id', { count: 'exact', head: true }).gte('timestamp', since7d);
+    res.json({ ok: true, total_chats: chatsCount || 0, messages_24h: msgs24 || 0, messages_7d: msgs7d || 0 });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 module.exports = router;
