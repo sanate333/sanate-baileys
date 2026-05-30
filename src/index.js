@@ -18,6 +18,8 @@ const { initAudioTTS, updateAudioSocket } = require('./audio-tts');
 const apiRoutes = require('./routes');
 const { startTrackingCron } = require('../tracking-cron');
 const storeContext = require('./store-context');
+const multiStore = require('./multi-store');
+const storesRoutes = require('./routes-stores');
 
 const app = express();
 const server = createServer(app);
@@ -70,6 +72,7 @@ app.get('/', (req, res) => {
 
 // === API ROUTES ===
 app.use('/api/whatsapp', apiRoutes);
+app.use('/api/whatsapp', storesRoutes);
 
 // === TRACKING CRON — manual trigger endpoint ===
 const TRACKING_SECRET = process.env.SECRET || process.env.BAILEYS_SECRET || 'sanate_secret_2025';
@@ -138,6 +141,7 @@ async function start() {
 
   // Multi-tenant: inicializar store context y cargar tiendas
   storeContext.init(supabase);
+  multiStore.init(supabase);
   await storeContext.loadStores();
 
   console.log('Cargando configuracion desde Supabase...');
@@ -156,6 +160,17 @@ async function start() {
 
   console.log('Iniciando Audio TTS...');
   initAudioTTS(supabase, null); // socket will be set on connection
+
+    // Multi-store: derive proxy URL for active store (sticky session per store)
+  if (process.env.WA_PROXY_URL) {
+    process.env._WA_PROXY_URL_BASE = process.env._WA_PROXY_URL_BASE || process.env.WA_PROXY_URL;
+    const activeStoreId = multiStore.getActiveStoreId();
+    const storeProxyUrl = multiStore.getProxyUrlForStore(activeStoreId);
+    if (storeProxyUrl) {
+      process.env.WA_PROXY_URL = storeProxyUrl;
+      console.log('[MultiStore] Proxy aplicado para store ' + activeStoreId.substring(0, 8) + '...');
+    }
+  }
 
   console.log('Iniciando conexion WhatsApp...');
   await initBaileys(supabase, sse);
