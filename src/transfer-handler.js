@@ -235,7 +235,31 @@ async function handleScreenshot(chatJid, phone, pushName, mediaUrl, _imageAnalys
     pendingTransfers.set(transferId, { clientJid: chatJid, phone, pushName, orderSummary, total, paymentMethod });
 
     // 2. Confirm to client
-    await sock.sendMessage(chatJid, { text: '📸 Recibimos tu pantallazo! En un momento lo confirmaremos, por favor esperar... ⏳' });
+    await sock.sendMessage(chatJid, { text: '📸 ¡Recibimos tu pantallazo!\n\nEn este momento lo estamos validando con nuestro equipo. Te confirmamos en 2-5 minutos aproximadamente. Por favor, espera un momento 🙏⏳' });
+
+    // ── REMINDER al cliente si pending > 20 min (escalación de espera) ──
+    setTimeout(async () => {
+      try {
+        const { data: t } = await supabase.from('oasis_wa_transfers').select('status').eq('id', transferId).single();
+        if (t && t.status === 'pending') {
+          await sock.sendMessage(chatJid, { text: '⏳ Hola de nuevo! Seguimos validando tu pantallazo. Gracias por tu paciencia, en breve te confirmamos 🙏' });
+          log('Cliente reminder pending >20min:', chatJid);
+        }
+      } catch (e) { logErr('Client reminder error:', e.message); }
+    }, 20 * 60 * 1000);
+
+    // ── REMINDER al RECEPTOR si pending > 10 min (anti-olvido) ──
+    setTimeout(async () => {
+      try {
+        const { data: t } = await supabase.from('oasis_wa_transfers').select('status').eq('id', transferId).single();
+        if (t && t.status === 'pending' && rJid) {
+          await waitForReceptorCooldown();
+          await sock.sendMessage(rJid, { text: `🔔 Recordatorio: transferencia de *${pushName}* (${phone}) sigue pendiente hace 10 min. Por favor revísala y aprueba o rechaza para que el cliente reciba respuesta.` });
+          _receptorLastSent = Date.now();
+          log('Receptor reminder pending >10min for transfer:', transferId);
+        }
+      } catch (e) { logErr('Receptor reminder error:', e.message); }
+    }, 10 * 60 * 1000);
 
     // 3. Clear awaiting_screenshot flag
     await supabase
@@ -456,7 +480,7 @@ async function handleReviewerResponse(chatJid, messageText) {
         .update({ status: 'approved', reviewed_at: new Date().toISOString() })
         .eq('id', transfer.id);
       await sock.sendMessage(transfer.clientJid, {
-        text: '✅ ¡Pantallazo confirmado! Tu envío ya va en camino, solo 1 a 3 días hábiles por Interrapidísimo 📦🚀'
+        text: `✅ ¡${transfer.pushName}, tu pantallazo fue confirmado!\n\nTu pedido ya va en camino 📦🚀\n\n• Envío: 1 a 3 días hábiles\n• Transportadora: Interrapidísimo\n• Te avisaremos cuando tengamos el código de guía\n\n¡Gracias por confiar en nosotros! 🙌`
       });
       if (rJid) await sock.sendMessage(rJid, { text: `✅ Transferencia de ${transfer.pushName} aprobada.` });
       log('Transfer approved:', transfer.id);
