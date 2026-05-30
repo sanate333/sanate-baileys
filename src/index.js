@@ -135,6 +135,12 @@ async function loadConfigFromSupabase(supabase) {
 // === ARRANCAR TODO ===
 async function start() {
   console.log('Sanate WhatsApp Bot Server v3.2');
+  // Multi-instance: auto-sync DEVICE_ID with STORE_ID for worker isolation
+  if (process.env.STORE_ID && !process.env.DEVICE_ID) {
+    process.env.DEVICE_ID = process.env.STORE_ID;
+    console.log('[MultiInstance] Auto-set DEVICE_ID=STORE_ID=' + process.env.STORE_ID.substring(0, 8) + '...');
+  }
+
   console.log('================================');
 
   console.log('Conectando Supabase...');

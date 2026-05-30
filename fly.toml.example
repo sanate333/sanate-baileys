@@ -1,0 +1,38 @@
+# Sanate Worker — Fly.io machine config (1 machine = 1 store)
+# Usage:
+#   1. fly auth login
+#   2. fly apps create sanate-worker-{store-slug}
+#   3. fly secrets set STORE_ID=<uuid> SUPABASE_URL=... SUPABASE_SERVICE_KEY=... \
+#      META_TOKEN=... META_PHONE_NUMBER_ID=... WA_PROXY_URL="socks5://user:pass@gate.proxy-cheap.com:7000"
+#   4. cp fly.toml.example fly.toml
+#   5. Edit "app" name below
+#   6. fly deploy
+
+app = "sanate-worker-tienda1"  # CHANGE per store
+primary_region = "scl"          # Santiago (closest to Colombia)
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "10000"
+  NODE_ENV = "production"
+
+[http_service]
+  internal_port = 10000
+  force_https = true
+  auto_stop_machines = "stop"   # Stops idle after timeout
+  auto_start_machines = true    # Auto-restarts on traffic
+  min_machines_running = 1      # Always 1 running for keepalive
+
+  [[http_service.checks]]
+    grace_period = "60s"
+    interval = "30s"
+    method = "GET"
+    timeout = "10s"
+    path = "/"
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 512               # 512MB per worker (Baileys ~50MB + overhead)
