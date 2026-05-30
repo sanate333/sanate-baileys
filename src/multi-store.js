@@ -69,10 +69,8 @@ async function saveCurrentAuthAs(storeId) {
       } catch {}
     }
     if (rows.length === 0) return { ok: true, files: 0 };
-    // Delete previous rows for this store to avoid orphan keys
-    await _supabase.from('oasis_wa_auth').delete().eq('device_id', storeId);
-    // Insert fresh
-    const { error } = await _supabase.from('oasis_wa_auth').insert(rows);
+    // Upsert: overwrite by id (auth file name); each row tagged with device_id=storeId
+    const { error } = await _supabase.from('oasis_wa_auth').upsert(rows, { onConflict: 'id' });
     if (error) throw error;
     return { ok: true, files: rows.length };
   } catch (e) {
