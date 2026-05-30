@@ -149,23 +149,29 @@ async function switchActiveStore(newStoreId) {
  * List all stores with their auth state (whether they have saved sessions).
  */
 async function listStoresWithStatus() {
-  if (!_supabase) return [];
+  if (!_supabase) { console.warn('[MultiStore] _supabase NULL en listStoresWithStatus'); return []; }
   try {
-    const { data: stores } = await _supabase
+    const { data: stores, error: storesErr } = await _supabase
       .from('oasis_stores')
       .select('id, name, slug, status, phone, plan')
       .order('created_at', { ascending: true });
+    if (storesErr) {
+      console.error('[MultiStore] Error consultando oasis_stores:', storesErr.message);
+      return [];
+    }
     const { data: auths } = await _supabase
       .from('oasis_wa_auth')
-      .select('device_id')
-      .neq('device_id', '');
-    const authSet = new Set((auths || []).map(a => a.device_id));
-    return (stores || []).map(s => ({
+      .select('device_id');
+    const authSet = new Set((auths || []).map(a => a.device_id).filter(Boolean));
+    const result = (stores || []).map(s => ({
       ...s,
       hasAuth: authSet.has(s.id),
       isActive: s.id === _activeStoreId
     }));
+    console.log('[MultiStore] listStoresWithStatus devolvio', result.length, 'tiendas');
+    return result;
   } catch (e) {
+    console.error('[MultiStore] Excepcion en listStoresWithStatus:', e.message);
     return [];
   }
 }
