@@ -20,6 +20,7 @@ const { startTrackingCron } = require('../tracking-cron');
 const storeContext = require('./store-context');
 const multiStore = require('./multi-store');
 const storesRoutes = require('./routes-stores');
+const transfersRoutes = require('./routes-transfers');
 
 const app = express();
 const server = createServer(app);
@@ -73,6 +74,7 @@ app.get('/', (req, res) => {
 // === API ROUTES ===
 app.use('/api/whatsapp', apiRoutes);
 app.use('/api/whatsapp', storesRoutes);
+app.use('/api/whatsapp', transfersRoutes);
 
 // === TRACKING CRON — manual trigger endpoint ===
 const TRACKING_SECRET = process.env.SECRET || process.env.BAILEYS_SECRET || 'sanate_secret_2025';

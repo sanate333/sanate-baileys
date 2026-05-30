@@ -36,7 +36,7 @@ const pendingTransfers = new Map();
 const lastOrderContext = new Map();
 
 // ── ANTI-SPAM/BAN HARDENING (30 may 2026) ──
-const MAX_TRANSFERS_PER_CHAT_PER_DAY = 3;
+const MAX_TRANSFERS_PER_CHAT_PER_DAY = parseInt(process.env.TRANSFER_CAP_PER_CHAT_PER_DAY) || 3;
 const RECEPTOR_COOLDOWN_MS = 8000;  // 8s entre mensajes al receptor (anti-spam)
 let _receptorLastSent = 0;
 
