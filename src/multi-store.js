@@ -90,9 +90,15 @@ async function loadAuthForStore(storeId) {
       .select('id, data')
       .eq('device_id', storeId);
     if (error) throw error;
-    // Clear local dir
-    if (fs.existsSync(AUTH_DIR)) fs.rmSync(AUTH_DIR, { recursive: true, force: true });
-    fs.mkdirSync(AUTH_DIR, { recursive: true });
+    // EBUSY-safe: clear CONTENTS of local dir (Docker volume mount)
+    if (fs.existsSync(AUTH_DIR)) {
+      for (const f of fs.readdirSync(AUTH_DIR)) {
+        try { fs.rmSync(path.join(AUTH_DIR, f), { recursive: true, force: true }); }
+        catch (e) { /* ignore */ }
+      }
+    } else {
+      fs.mkdirSync(AUTH_DIR, { recursive: true });
+    }
     if (!data || data.length === 0) return { ok: true, files: 0, isNew: true };
     for (const row of data) {
       fs.writeFileSync(path.join(AUTH_DIR, row.id), JSON.stringify(row.data));

@@ -91,10 +91,15 @@ async function saveAuthToSupabase(supabase) {
  */
 async function clearLocalAuth() {
   try {
+    // EBUSY-safe: clear CONTENTS, not the dir itself (Docker volume mount)
     if (existsSync(AUTH_DIR)) {
-      rmSync(AUTH_DIR, { recursive: true, force: true });
+      for (const f of readdirSync(AUTH_DIR)) {
+        try { rmSync(path.join(AUTH_DIR, f), { recursive: true, force: true }); }
+        catch (e) { console.warn('[AUTH] skip rm ' + f + ':', e.message); }
+      }
+    } else {
+      mkdirSync(AUTH_DIR, { recursive: true });
     }
-    mkdirSync(AUTH_DIR, { recursive: true });
     console.log('[AUTH] Auth local limpiada - se recargara desde Supabase en la proxima conexion');
   } catch (err) {
     console.error('[AUTH] Error limpiando auth local:', err.message);
@@ -105,9 +110,13 @@ async function clearLocalAuth() {
  * Clear auth from both filesystem and Supabase
  */
 async function clearAuth(supabase) {
-  // Clear local
+  // EBUSY-safe: clear CONTENTS, not the dir itself (Docker volume mount)
   if (existsSync(AUTH_DIR)) {
-    rmSync(AUTH_DIR, { recursive: true, force: true });
+    for (const f of readdirSync(AUTH_DIR)) {
+      try { rmSync(path.join(AUTH_DIR, f), { recursive: true, force: true }); }
+      catch (e) { console.warn('[AUTH] skip rm ' + f + ':', e.message); }
+    }
+  } else {
     mkdirSync(AUTH_DIR, { recursive: true });
   }
 
