@@ -13,6 +13,23 @@
  */
 
 let supabaseClient = null;
+
+// ===== COIN TRACKING — WaZap (verde) =====
+// Carga el store_id desde env (mismo que session_locked)
+const COIN_STORE_ID = process.env.STORE_ID || '00000000-0000-0000-0000-000000000001';
+async function trackWaZapCoin(chatJid) {
+  if (!supabaseClient || !chatJid) return;
+  try {
+    const { data, error } = await supabaseClient.rpc('track_wazap_coin', {
+      p_store_id: COIN_STORE_ID,
+      p_chat_jid: chatJid
+    });
+    if (error) console.warn('[CoinTrack] track_wazap_coin error:', error.message);
+    else if (data && data.charged) console.log('[CoinTrack] 💚 -1 coin — remaining:', data.remaining_coins);
+  } catch (e) { console.warn('[CoinTrack] exception:', e.message); }
+}
+
+
 let sock = null;
 let sseManager = null;
 
@@ -244,6 +261,8 @@ async function botSend(chatJid, content, opts = {}) {
       // ── ANTI-BAN: registrar envío exitoso ──
       if (antiban) { try { antiban.afterSend(chatJid, textForLog); } catch(e) {} }
       _trackReplyRatio(phoneNum, 'out');
+      // ── COIN: track WaZap conversation (regla 24h)
+      trackWaZapCoin(chatJid).catch(()=>{});
       return { sent: true, channel: 'baileys' };
     } catch (e) {
       console.log('[botSend] Baileys falló:', e.message, '— intentando Cloud API...');
@@ -256,6 +275,7 @@ async function botSend(chatJid, content, opts = {}) {
   if (metaSendFn && phoneNum) {
     try {
       await metaSendFn(phoneNum, textForLog);
+      trackWaZapCoin(chatJid).catch(()=>{});
       return { sent: true, channel: 'meta' };
     } catch (e) {
       console.error('[botSend] Cloud API falló:', e.message);
