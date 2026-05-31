@@ -104,8 +104,8 @@ router.get('/transfers/engagement', async (req, res) => {
     const since24h = new Date(Date.now() - 24*60*60*1000).toISOString();
     const since7d = new Date(Date.now() - 7*24*60*60*1000).toISOString();
     const [msgs24h, msgs7d, transfers7d] = await Promise.all([
-      supabase.from('oasis_wa_messages').select('id,direction', { count: 'exact', head: false }).gte('timestamp', Math.floor(Date.parse(since24h)/1000)),
-      supabase.from('oasis_wa_messages').select('id,direction', { count: 'exact', head: false }).gte('timestamp', Math.floor(Date.parse(since7d)/1000)),
+      supabase.from('oasis_wa_messages').select('id,direction', { count: 'exact', head: false }).gte('timestamp', since24h),
+      supabase.from('oasis_wa_messages').select('id,direction', { count: 'exact', head: false }).gte('timestamp', since7d),
       supabase.from('oasis_wa_transfers').select('status', { count: 'exact' }).gte('created_at', since7d)
     ]);
     function countByDir(arr) {
@@ -133,11 +133,11 @@ router.get('/chats/export.csv', async (req, res) => {
     const supabase = getSupabase(req);
     if (!supabase) return res.status(503).json({ error: 'Supabase no disponible' });
     const days = Math.min(parseInt(req.query.days) || 30, 365);
-    const since = Math.floor((Date.now() - days * 24 * 60 * 60 * 1000) / 1000);
+    const sinceIso = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
     const { data, error } = await supabase
       .from('oasis_wa_messages')
       .select('id,chat_jid,chat_name,message_id,direction,content,media_type,timestamp')
-      .gte('timestamp', since)
+      .gte('timestamp', sinceIso)
       .order('timestamp', { ascending: false })
       .limit(5000);
     if (error) throw error;
@@ -158,8 +158,8 @@ router.get('/chats/stats', async (req, res) => {
   try {
     const supabase = getSupabase(req);
     if (!supabase) return res.status(503).json({ error: 'Supabase no disponible' });
-    const since24 = Math.floor((Date.now() - 24 * 60 * 60 * 1000) / 1000);
-    const since7d = Math.floor((Date.now() - 7 * 24 * 60 * 60 * 1000) / 1000);
+    const since24 = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const since7d = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
     const { count: chatsCount } = await supabase.from('oasis_wa_chats').select('id', { count: 'exact', head: true });
     const { count: msgs24 } = await supabase.from('oasis_wa_messages').select('id', { count: 'exact', head: true }).gte('timestamp', since24);
     const { count: msgs7d } = await supabase.from('oasis_wa_messages').select('id', { count: 'exact', head: true }).gte('timestamp', since7d);
