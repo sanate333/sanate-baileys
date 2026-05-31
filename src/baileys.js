@@ -274,6 +274,26 @@ async function initBaileys(supabase, sse) {
   supabaseClient = supabase;
   sseManager = sse;
   setSseManager(sse); // Pasar SSE manager a auto-reply para eventos bot_typing
+
+  // SESSION LOCK CHECK: si oasis_stores.session_locked=true, NO auto-conectar
+  try {
+    const storeId = process.env.STORE_ID || '00000000-0000-0000-0000-000000000001';
+    const { data, error } = await supabase
+      .from('oasis_stores')
+      .select('session_locked')
+      .eq('id', storeId)
+      .single();
+    if (data && data.session_locked === true) {
+      console.log('[initBaileys] session_locked=true → NO auto-connect. Esperando POST /connect con force=true.');
+      permanentDisconnect = true;
+      userDisconnected = true;
+      if (sseManager) sseManager.broadcast({ type: 'connection', data: { status: 'disconnected', reason: 'session_locked' } });
+      return;
+    }
+  } catch (e) {
+    console.warn('[initBaileys] no se pudo leer session_locked:', e.message);
+  }
+
   await connectToWhatsApp();
 }
 
@@ -1311,6 +1331,15 @@ async function disconnect() {
   // 11. Broadcast para que el frontend sepa que se desconecto
   if (sseManager) sseManager.broadcast({ type: 'connection', data: { status: 'disconnected', reason: 'intentional_logout' } });
   console.log('[Desvincular] Desvinculacion completa — userDisconnected=true, solo POST /connect puede reconectar');
+
+  // PERSIST: set session_locked=true en Supabase (sobrevive restart)
+  try {
+    const storeId = process.env.STORE_ID || '00000000-0000-0000-0000-000000000001';
+    if (supabaseClient) {
+      await supabaseClient.from('oasis_stores').update({ session_locked: true }).eq('id', storeId);
+      console.log('[Desvincular] session_locked=true persistido en Supabase');
+    }
+  } catch (e) { console.warn('[Desvincular] no se pudo persistir session_locked:', e.message); }
 }
 
 async function startConnection(options) {
@@ -1336,6 +1365,17 @@ async function startConnection(options) {
   }
 
   console.log('[Connect] Iniciando nueva conexion' + (force ? ' (FORCE)' : '') + ' para generar QR...');
+
+  // PERSIST: set session_locked=false en Supabase cuando user hace click "Conectar"
+  if (force) {
+    try {
+      const storeId = process.env.STORE_ID || '00000000-0000-0000-0000-000000000001';
+      if (supabaseClient) {
+        await supabaseClient.from('oasis_stores').update({ session_locked: false }).eq('id', storeId);
+        console.log('[Connect] session_locked=false persistido en Supabase');
+      }
+    } catch (e) { console.warn('[Connect] no se pudo desbloquear session_locked:', e.message); }
+  }
 
   // Cancelar cualquier timer de reconexion pendiente
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
