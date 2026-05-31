@@ -3,6 +3,7 @@
  * Handles: TTS generation, OGG conversion, per-conversation audio counting, settings persistence
  */
 const { spawn } = require('child_process');
+const apiTracker = require('./api-tracker');
 
 // Try bundled ffmpeg-static first, fall back to system ffmpeg
 let ffmpegBin = 'ffmpeg';
@@ -138,6 +139,7 @@ function checkAndIncrementAudioCount(chatJid) {
 // ═══════════════════════════════════════════════════════════
 async function callGeminiTTS(text, voiceName, apiKey) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`;
+  const _atKey = apiKey;
   const body = {
     contents: [{ parts: [{ text }] }],
     generationConfig: {
@@ -156,6 +158,7 @@ async function callGeminiTTS(text, voiceName, apiKey) {
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(45000),
   });
+  try { apiTracker.track(_atKey, res.ok, res.status).catch(()=>{}); } catch(e) {}
 
   if (!resp.ok) {
     const errText = await resp.text();

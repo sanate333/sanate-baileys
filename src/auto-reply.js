@@ -13,6 +13,7 @@
  */
 
 let supabaseClient = null;
+const apiTracker = require('./api-tracker');
 
 // ===== COIN TRACKING — WaZap (verde) =====
 // Carga el store_id desde env (mismo que session_locked)
@@ -130,6 +131,7 @@ async function isBotWithinSchedule() {
 
 async function initAutoReply(supabase, socket) {
   supabaseClient = supabase;
+  apiTracker.init(supabase).catch(()=>{});
   sock = socket;
   await loadConfigFromSupabase();
   await loadKeywordTemplates();
@@ -1257,6 +1259,8 @@ async function getHistory(chatJid) {
 async function callGemini(systemPrompt, history) {
   try {
     const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=' + aiConfig.geminiKey;
+    const _trackKey = aiConfig.geminiKey;
+    const _trackUrl = url;
 
     /* Consolidate consecutive model/user messages to avoid Gemini confusion */
     const contents = [];
@@ -1290,6 +1294,7 @@ async function callGemini(systemPrompt, history) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
+    try { apiTracker.track(_trackKey, resp.ok, resp.status).catch(()=>{}); } catch(e) {}
 
     if (!resp.ok) {
       const errText = await resp.text();

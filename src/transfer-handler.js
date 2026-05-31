@@ -78,6 +78,7 @@ async function validatePaymentScreenshot(imageBuffer, hintMethod) {
         generationConfig: { temperature: 0.0, maxOutputTokens: 5 }
       })
     });
+    try { apiTracker.track(key, resp.ok, resp.status).catch(()=>{}); } catch(e) {}
     if (!resp.ok) return { ok: true, reason: 'gemini-error-allow' };
     const data = await resp.json();
     const verdict = (data?.candidates?.[0]?.content?.parts?.[0]?.text || '').trim().toUpperCase();
