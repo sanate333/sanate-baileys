@@ -193,6 +193,33 @@ async function start() {
   });
   console.log('Tracking cron activo');
 
+  // v5.130: Meta WhatsApp Cloud API integration (Embedded Signup + Coexistence)
+  try {
+    const setupMeta = require('./meta');
+    setupMeta(app, {
+      supabase,
+      sse,
+      onMessage: async ({ storeId, from, contactName, body, type, buttonReply }) => {
+        try {
+          const { handleIncomingMessage } = require('./auto-reply');
+          await handleIncomingMessage({
+            jid: from,
+            name: contactName,
+            text: body,
+            type,
+            source: 'meta',
+            storeId,
+            buttonReply
+          });
+        } catch (e) {
+          console.error('[Meta auto-reply]', e.message);
+        }
+      }
+    });
+  } catch (e) {
+    console.warn('[Meta] Setup failed:', e.message);
+  }
+
   // v5.115: Anti-ban metrics cron (Meta 2026 ML)
   try {
     const antiBanCron = require('./anti-ban-metrics-cron');
