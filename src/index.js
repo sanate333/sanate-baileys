@@ -73,6 +73,8 @@ app.get('/', (req, res) => {
 
 // === API ROUTES ===
 app.use('/api/whatsapp', apiRoutes);
+// v5.115: endpoint linked-devices para verificar WA Web vinculado
+require('./linked-devices-endpoint')(app);
 app.use('/api/whatsapp', storesRoutes);
 app.use('/api/whatsapp', transfersRoutes);
 
@@ -190,6 +192,15 @@ async function start() {
     return { sock: getSocket(), status: getConnectionState() === 'open' ? 'connected' : 'disconnected' };
   });
   console.log('Tracking cron activo');
+
+  // v5.115: Anti-ban metrics cron (Meta 2026 ML)
+  try {
+    const antiBanCron = require('./anti-ban-metrics-cron');
+    antiBanCron.start(supabase);
+    console.log('[Anti-Ban] Metrics cron iniciado');
+  } catch (e) {
+    console.warn('[Anti-Ban] Cron load failed:', e.message);
+  }
 }
 
 start().catch(err => {
