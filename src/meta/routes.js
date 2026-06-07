@@ -26,13 +26,17 @@ function makeRoutes({ supabase, sse, onMessage }) {
   const REDIRECT_URI = process.env.META_REDIRECT_URI || 'https://sanate.store/dashboard/whatsapp-bot';
 
   // Middleware para acceder a rawBody en el webhook (necesario para signature)
-  router.use('/meta/webhook', express.raw({ type: 'application/json', limit: '1mb' }), (req, res, next) => {
+  // NOTA: si express.json() global tiene verify callback, req.rawBody ya está set
+  router.use('/meta/webhook', (req, res, next) => {
     if (req.method === 'POST') {
-      try {
-        req.rawBody = req.body.toString('utf8');
-        req.body = JSON.parse(req.rawBody);
-      } catch (e) {
-        req.body = {};
+      // Only fall back to raw parsing if rawBody not already captured by global verify
+      if (!req.rawBody && Buffer.isBuffer(req.body)) {
+        try {
+          req.rawBody = req.body.toString('utf8');
+          req.body = JSON.parse(req.rawBody);
+        } catch (e) {
+          req.body = {};
+        }
       }
     }
     next();
