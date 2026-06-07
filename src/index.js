@@ -46,7 +46,7 @@ app.use(cors({
   origin: ['https://sanate.store', 'http://localhost:3000'],
   credentials: true
 }));
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '10mb', verify: (req, res, buf) => { req.rawBody = buf.toString('utf8'); } }));
 // Multi-tenant: attach store_id to every request
 app.use(storeContext.storeMiddleware);
 
