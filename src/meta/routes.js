@@ -302,6 +302,81 @@ function makeRoutes({ supabase, sse, onMessage }) {
     }
   });
 
+  /* v5.144: Get WhatsApp Business Profile from Meta */
+  router.get('/meta/profile', async (req, res) => {
+    try {
+      const store_id = req.query.store_id;
+      if (!store_id) return res.status(400).json({ error: 'store_id requerido' });
+      const { data: conn } = await supabase
+        .from('oasis_waba_connections')
+        .select('phone_number_id, access_token, status')
+        .eq('store_id', store_id)
+        .maybeSingle();
+      if (!conn || conn.status !== 'connected') return res.status(400).json({ error: 'No conectado a Meta' });
+      const url = `https://graph.facebook.com/v22.0/${conn.phone_number_id}/whatsapp_business_profile?fields=about,address,description,email,profile_picture_url,websites,vertical`;
+      const r = await fetch(url, { headers: { 'Authorization': `Bearer ${conn.access_token}` } });
+      const j = await r.json();
+      if (!r.ok || j.error) return res.status(500).json({ error: j.error?.message || 'Error Meta', details: j.error });
+      const profile = (j.data && j.data[0]) || {};
+      res.json({ ok: true, profile });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  /* v5.144: Update WhatsApp Business Profile via Meta Graph API */
+  router.post('/meta/profile/update', express.json({ limit: '5mb' }), async (req, res) => {
+    try {
+      const { store_id, about, description, address, email, vertical, websites } = req.body;
+      if (!store_id) return res.status(400).json({ error: 'store_id requerido' });
+      const { data: conn } = await supabase
+        .from('oasis_waba_connections')
+        .select('phone_number_id, access_token, status')
+        .eq('store_id', store_id)
+        .maybeSingle();
+      if (!conn || conn.status !== 'connected') return res.status(400).json({ error: 'No conectado a Meta' });
+      const payload = { messaging_product: 'whatsapp' };
+      if (about !== undefined) payload.about = String(about).slice(0, 139);
+      if (description !== undefined) payload.description = String(description).slice(0, 512);
+      if (address !== undefined) payload.address = String(address).slice(0, 256);
+      if (email !== undefined) payload.email = String(email).slice(0, 128);
+      if (vertical !== undefined) payload.vertical = vertical;
+      if (websites !== undefined && Array.isArray(websites)) payload.websites = websites.slice(0, 2);
+      const url = `https://graph.facebook.com/v22.0/${conn.phone_number_id}/whatsapp_business_profile`;
+      const r = await fetch(url, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${conn.access_token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const j = await r.json();
+      if (!r.ok || j.error) return res.status(500).json({ error: j.error?.message || 'Error actualizando perfil', details: j.error });
+      res.json({ ok: true, updated: j });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  /* v5.144: List all phone numbers for the WABA (multi-número support) */
+  router.get('/meta/numbers', async (req, res) => {
+    try {
+      const store_id = req.query.store_id;
+      if (!store_id) return res.status(400).json({ error: 'store_id requerido' });
+      const { data: conn } = await supabase
+        .from('oasis_waba_connections')
+        .select('waba_id, access_token, status, phone_number_id, phone_number, display_name')
+        .eq('store_id', store_id)
+        .maybeSingle();
+      if (!conn || conn.status !== 'connected') return res.json({ numbers: [] });
+      const url = `https://graph.facebook.com/v22.0/${conn.waba_id}/phone_numbers?fields=id,display_phone_number,verified_name,quality_rating,messaging_limit,name_status,certificate`;
+      const r = await fetch(url, { headers: { 'Authorization': `Bearer ${conn.access_token}` } });
+      const j = await r.json();
+      if (!r.ok || j.error) return res.json({ numbers: [{ id: conn.phone_number_id, display_phone_number: conn.phone_number, verified_name: conn.display_name }] });
+      res.json({ numbers: j.data || [], primary_id: conn.phone_number_id });
+    } catch (err) {
+      res.json({ numbers: [], error: err.message });
+    }
+  });
+
   /* Disconnect — mantiene chats, solo invalida el token */
   router.post('/meta/disconnect', express.json(), async (req, res) => {
     try {
