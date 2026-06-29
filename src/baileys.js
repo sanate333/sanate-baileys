@@ -21,7 +21,7 @@ try {
 }
 
 function getProxyAgent() {
-  const proxyUrl = 'socks5://mMEUYyJgq5EQO5L:fLqIWmbiEORSaSm@proxy-us.proxy-cheap.com:5959';
+  const proxyUrl = 'http://mMEUYyJgq5EQO5L:fLqIWmbiEORSaSm@proxy-us.proxy-cheap.com:5959';
   if (!proxyUrl) return undefined;
   try {
     if (proxyUrl.startsWith('socks')) {
@@ -473,7 +473,7 @@ async function connectToWhatsApp() {
 
   // ── PROXY: inyectar agent si WA_PROXY_URL está configurado ──
   const proxyAgent = getProxyAgent();
-  if (proxyAgent) console.log('[Proxy] Conectando vía proxy:', 'socks5://mMEUYyJgq5EQO5L:fLqIWmbiEORSaSm@proxy-us.proxy-cheap.com:5959'.replace(/\/\/.*@/, '//***@'));
+  if (proxyAgent) console.log('[Proxy] Conectando vía proxy:', 'http://mMEUYyJgq5EQO5L:fLqIWmbiEORSaSm@proxy-us.proxy-cheap.com:5959'.replace(/\/\/.*@/, '//***@'));
 
   const rawSock = makeWASocket({
     version,
