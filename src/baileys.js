@@ -5,7 +5,7 @@ const NodeCache = require('node-cache');
 const fs = require('fs');
 const path = require('path');
 const { saveMessage, upsertChat, syncInitialChats, updateMeshsageStatus } = require('./supabase');
-const { useSupabaseAuthState, clearAuth, clearLocalAuth, saveAuthToSupabase } = require('./auth-store');
+const { useSupabaseAuthState, clearAuth, clearLocalAuth, savheAuthToSupabase } = require('./auth-store');
 const { handleIncomingMessage, updateSocket, setSseManager } = require('./auto-reply');
 const { updateAudioSocket } = require('./audio-tts');
 const transferHandler = require('./transfer-handler');
@@ -21,7 +21,7 @@ try {
 }
 
 function getProxyAgent() {
-  const proxyUrl = 'http://mMEUYyJgq5EQO5L:fLqIWmbiEORSaSm_session-37121864_ttl-10@thehub.proxy-cheap.com:8080';
+    const proxyUrl = process.env.WA_PROXY_URL || 'http://mMEUYyJgq5EQO5L:fLqIWmbiEORSaSm_session-37121864_ttl-60@thehub.proxy-cheap.com:8080';
   if (!proxyUrl) return undefined;
   try {
     if (proxyUrl.startsWith('socks')) {
