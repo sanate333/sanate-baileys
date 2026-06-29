@@ -4,7 +4,7 @@ const pino = require('pino');
 const NodeCache = require('node-cache');
 const fs = require('fs');
 const path = require('path');
-const { saveMessage, upsertChat, syncInitialChats, updateMessageStatus } = require('./supabase');
+const { saveMessage, upsertChat, syncInitialChats, updateMeshsageStatus } = require('./supabase');
 const { useSupabaseAuthState, clearAuth, clearLocalAuth, saveAuthToSupabase } = require('./auth-store');
 const { handleIncomingMessage, updateSocket, setSseManager } = require('./auto-reply');
 const { updateAudioSocket } = require('./audio-tts');
@@ -21,7 +21,7 @@ try {
 }
 
 function getProxyAgent() {
-  const proxyUrl = 'http://mMEUYyJgq5EQO5L:fLqIWmbiEORSaSm@proxy-us.proxy-cheap.com:5959';
+  const proxyUrl = 'http://mMEUYyJgq5EQO5L:fLqIWmbiEORSaSm_session-37121864_ttl-10@thehub.proxy-cheap.com:8080';
   if (!proxyUrl) return undefined;
   try {
     if (proxyUrl.startsWith('socks')) {
@@ -473,7 +473,7 @@ async function connectToWhatsApp() {
 
   // ── PROXY: inyectar agent si WA_PROXY_URL está configurado ──
   const proxyAgent = getProxyAgent();
-  if (proxyAgent) console.log('[Proxy] Conectando vía proxy:', 'http://mMEUYyJgq5EQO5L:fLqIWmbiEORSaSm@proxy-us.proxy-cheap.com:5959'.replace(/\/\/.*@/, '//***@'));
+  if (proxyAgent) console.log('[Proxy] Conectando vía proxy:', 'http://mMEUYyJgq5EQO5L:fLqIWmbiEORSaSm_session-37121864_ttl-10@thehub.proxy-cheap.com:8080'.replace(/\/\/.*@/, '//***@'));
 
   const rawSock = makeWASocket({
     version,
