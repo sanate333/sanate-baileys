@@ -4,7 +4,7 @@ const {
   default: makeWASocket,
     fetchLatestBaileysVersion,
       DisconnectReason,
-        makeCacheableSignalKeyStore,
+        makeCacheableSignalKeyStore,h
         } = require('@whiskeysockets/baileys');
         const pino = require('pino');
 
@@ -125,7 +125,8 @@ const {
                                                                                                                                                                                                                                                                       printQRInTerminal: false,
                                                                                                                                                                                                                                                                           generateHighQualityLinkPreview: false,
                                                                                                                                                                                                                                                                               syncFullHistory: false,
-                                                                                                                                                                                                                                                                                  connectTimeoutMs: 60000,
+                                                                                                                                                                                                                                                                                  connectTimeoutMs: 15000,
+                                                                                                                                                                                                                          keepAliveIntervalMs: 15000,
                                                                                                                                                                                                                                                                                       retryRequestDelayMs: 250,
                                                                                                                                                                                                                                                                                         });
                                                                                                                                                                                                                                                                                         
