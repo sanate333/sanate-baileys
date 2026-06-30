@@ -180,6 +180,62 @@ async function listStoresWithStatus() {
   }
 }
 
+async function makeAuthState(storeId) {
+    if (!_supabase) throw new Error('[MultiStore] Supabase not initialized in makeAuthState');
+    const { data, error } = await _supabase
+      .from('oasis_wa_auth')
+      .select('id, data')
+      .eq('store_id', storeId);
+    if (error) console.warn('[MultiStore][makeAuthState] Load error:', error.message);
+    const fileMap = {};
+    for (const row of (data || [])) {
+          const filename = row.id.includes(':') ? row.id.split(':').slice(1).join(':') : row.id;
+          try { fileMap[filename] = typeof row.data === 'string' ? JSON.parse(row.data) : row.data; } catch(e) {}
+    }
+    const { initAuthCreds } = require('@whiskeysockets/baileys');
+    const creds = fileMap['creds'] || initAuthCreds();
+    const keys = {
+          get: async (type, ids) => {
+                  const result = {};
+                  for (const id of ids) {
+                            const k = fileMap[type + '-' + id];
+                            result[id] = k ? JSON.parse(JSON.stringify(k)) : undefined;
+                  }
+                  return result;
+          },
+          set: async (data) => {
+                  const toUpsert = [];
+                  for (const [category, entries] of Object.entries(data)) {
+                            for (const [id, value] of Object.entries(entries || {})) {
+                                        const filename = category + '-' + id;
+                                        if (value) {
+                                                      fileMap[filename] = value;
+                                                      toUpsert.push({ id: storeId + ':' + filename, store_id: storeId, device_id: storeId, data: JSON.parse(JSON.stringify(value)), updated_at: new Date().toISOString() });
+                                        } else {
+                                                      delete fileMap[filename];
+                                                      _supabase.from('oasis_wa_auth').delete().eq('id', storeId + ':' + filename).then(() => {}).catch(() => {});
+                                        }
+                            }
+                  }
+                  if (toUpsert.length > 0) {
+                            _supabase.from('oasis_wa_auth').upsert(toUpsert, { onConflict: 'id' }).then(({ error: e }) => { if (e) console.warn('[MultiStore][keys.set]', e.message); }).catch(e => console.warn('[MultiStore][keys.set]', e.message));
+                  }
+          },
+    };
+    const state = { creds, keys };
+    let _lastSave = 0;
+    async function saveCreds() {
+          fileMap['creds'] = state.creds;
+          const now = Date.now();
+          if (now - _lastSave < 20000) return;
+          _lastSave = now;
+          try {
+                  await _supabase.from('oasis_wa_auth').upsert({ id: storeId + ':creds', store_id: storeId, device_id: storeId, data: JSON.parse(JSON.stringify(state.creds)), updated_at: new Date().toISOString() }, { onConflict: 'id' });
+          } catch(e) { console.error('[MultiStore][saveCreds]', e.message); }
+    }
+    return { state, saveCreds };
+}
+
 module.exports = {
   DEFAULT_STORE_ID,
   init,
@@ -188,5 +244,6 @@ module.exports = {
   saveCurrentAuthAs,
   loadAuthForStore,
   switchActiveStore,
-  listStoresWithStatus
+  listStoresWithStatus,
+    makeAuthState
 };
