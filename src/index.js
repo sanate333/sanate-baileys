@@ -21,6 +21,8 @@ const storeContext = require('./store-context');
 const multiStore = require('./multi-store');
 const storesRoutes = require('./routes-stores');
 const transfersRoutes = require('./routes-transfers');
+const SM = require('./session-manager');
+const routesMulti = require('./routes-multi');
 
 const app = express();
 const server = createServer(app);
@@ -72,6 +74,7 @@ app.get('/', (req, res) => {
 });
 
 // === API ROUTES ===
+app.use('/api/whatsapp', routesMulti);
 app.use('/api/whatsapp', apiRoutes);
 // v5.115: endpoint linked-devices para verificar WA Web vinculado
 require('./linked-devices-endpoint')(app);
@@ -152,6 +155,12 @@ async function start() {
   // Multi-tenant: inicializar store context y cargar tiendas
   storeContext.init(supabase);
   multiStore.init(supabase);
+    SM.init(supabase);
+    SM.setSseManager(sse);
+    const defaultStore = process.env.STORE_ID || 'default';
+    SM.getOrCreate(defaultStore).then(s => {
+          console.log('[SM] Session "' + defaultStore.substring(0, 8) + '" started -> ' + s.status);
+    }).catch(e => console.error('[SM] Error starting default session:', e.message));
   await storeContext.loadStores();
 
   console.log('Cargando configuracion desde Supabase...');
@@ -258,6 +267,10 @@ async function gracefulShutdown(signal) {
     try { sock.end(undefined); } catch(e) {}
     console.log('[Shutdown] Socket de Baileys cerrado');
   }
+    // Cerrar todas las sesiones SM limpiamente
+    for (const [sid] of SM.sessions) {
+          try { await SM.stopSession(sid); } catch(e) {}
+    }
 
   // 3. Cerrar servidor HTTP
   server.close(() => {
