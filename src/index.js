@@ -157,10 +157,13 @@ async function start() {
   multiStore.init(supabase);
     SM.init(supabase);
     SM.setSseManager(sse);
-    const defaultStore = process.env.STORE_ID || 'default';
-    SM.getOrCreate(defaultStore).then(s => {
+    const defaultStore = process.env.STORE_ID;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      if (defaultStore && UUID_RE.test(defaultStore)) {
+            SM.getOrCreate(defaultStore).then(s => {
           console.log('[SM] Session "' + defaultStore.substring(0, 8) + '" started -> ' + s.status);
     }).catch(e => console.error('[SM] Error starting default session:', e.message));
+      }
   await storeContext.loadStores();
 
   console.log('Cargando configuracion desde Supabase...');
