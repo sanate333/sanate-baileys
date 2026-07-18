@@ -21,7 +21,7 @@ try {
 }
 
 function getProxyAgent() {
-    const proxyUrl = process.env.WA_PROXY_URL || 'http://mMEUYyJgq5EQO5L:fLqIWmbiEORSaSm_session-37121864_ttl-60@thehub.proxy-cheap.com:8080';
+    const proxyUrl = process.env.WA_PROXY_URL || 'http://oasiswa:oasiswa2026k7@169.58.37.20:8899';
   if (!proxyUrl) return undefined;
   try {
     if (proxyUrl.startsWith('socks')) {
@@ -473,7 +473,7 @@ async function connectToWhatsApp() {
 
   // ── PROXY: inyectar agent si WA_PROXY_URL está configurado ──
   const proxyAgent = getProxyAgent();
-  if (proxyAgent) console.log('[Proxy] Conectando vía proxy:', 'http://mMEUYyJgq5EQO5L:fLqIWmbiEORSaSm_session-37121864_ttl-10@thehub.proxy-cheap.com:8080'.replace(/\/\/.*@/, '//***@'));
+  if (proxyAgent) console.log('[Proxy] Conectando vía proxy:', 'http://oasiswa:oasiswa2026k7@169.58.37.20:8899'.replace(/\/\/.*@/, '//***@'));
 
   const rawSock = makeWASocket({
     version,
